@@ -68,7 +68,7 @@ if str(MAIN_DIR) not in sys.path:
 from controller import CuroboIKController, ResidualController
 from env import CEHJ_ROOT, Env
 from obstacle import choose_and_spawn, update_curobo_world
-from record import attach_recorder, detach_recorder, save_video
+from record import attach_recorder, detach_recorder, save_video, write_hold_trace
 from tasks import SAFETY_TASKS, resolve_arm, TASK_SPECS
 
 CONTROLLERS = {
@@ -258,12 +258,14 @@ def run_episode(args: argparse.Namespace) -> dict:
     if cluttered:
         tag += "_clutter"
     out_dir = args.output.expanduser() / args.task / env.embodiment / tag
+    out_dir.mkdir(parents=True, exist_ok=True)
     outputs = {}
     if streams["agent_rgb"]:
         for name, frames in streams.items():
             outputs[name] = str(save_video(frames, out_dir / f"{name}.mp4", args.fps))
     else:
         print("[run] no frames recorded")
+    hold_trace = str(write_hold_trace(rec.get("csv_rows", []), out_dir / "hold_trace.csv"))
 
     summary = {
         "task": args.task,
@@ -285,9 +287,10 @@ def run_episode(args: argparse.Namespace) -> dict:
         "play_error": play_error,
         "obstacle_xyz": None if xyz is None else xyz.tolist(),
         "videos": outputs,
+        "hold_trace": hold_trace,
         "n_frames": len(streams["agent_rgb"]),
+        "n_steps": rec.get("n", 0),
     }
-    out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)
     env.close()

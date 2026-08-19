@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -134,6 +135,120 @@ def draw_debug_bboxes(env, frame: np.ndarray) -> np.ndarray:
     return img
 
 
+HOLD_CSV_FIELDS = [
+    "step",
+    "recorded",
+    "holding",
+    "hold_source",
+    "hold_fail",
+    "hold_side",
+    "near",
+    "near_reason",
+    "contact_grip_obj",
+    "left_grip",
+    "right_grip",
+    "left_holding",
+    "right_holding",
+    "origin_dist_ee",
+    "origin_dist_tcp",
+    "ee_obb",
+    "tcp_obb",
+    "grip_obb",
+    "L_origin_dist_ee",
+    "L_origin_dist_tcp",
+    "L_tcp_obb",
+    "L_grip_obb",
+    "L_near",
+    "R_origin_dist_ee",
+    "R_origin_dist_tcp",
+    "R_tcp_obb",
+    "R_grip_obb",
+    "R_near",
+    "d_robot",
+    "d_held",
+    "d_sys",
+    "contact_obstacle",
+    "closest",
+    "obj_x",
+    "obj_y",
+    "obj_z",
+    "tcp_x",
+    "tcp_y",
+    "tcp_z",
+    "ee_x",
+    "ee_y",
+    "ee_z",
+]
+
+
+def _hold_csv_row(step: int, recorded: int, dbg: dict, info: dict | None = None) -> dict:
+    row = {key: "" for key in HOLD_CSV_FIELDS}
+    row["step"] = step
+    row["recorded"] = recorded
+    row["holding"] = dbg.get("holding") or (info or {}).get("holding") or ""
+    row["hold_source"] = dbg.get("source", "")
+    row["hold_fail"] = dbg.get("fail", "")
+    row["hold_side"] = dbg.get("side", "")
+    row["near"] = int(bool(dbg.get("near")))
+    row["near_reason"] = dbg.get("near_reason", "")
+    row["contact_grip_obj"] = int(bool(dbg.get("contact_grip_obj")))
+    row["left_grip"] = dbg.get("left_grip", "")
+    row["right_grip"] = dbg.get("right_grip", "")
+    row["left_holding"] = int(bool(dbg.get("left_holding")))
+    row["right_holding"] = int(bool(dbg.get("right_holding")))
+    for key in (
+        "origin_dist_ee",
+        "origin_dist_tcp",
+        "ee_obb",
+        "tcp_obb",
+        "grip_obb",
+        "L_origin_dist_ee",
+        "L_origin_dist_tcp",
+        "L_tcp_obb",
+        "L_grip_obb",
+        "L_near",
+        "R_origin_dist_ee",
+        "R_origin_dist_tcp",
+        "R_tcp_obb",
+        "R_grip_obb",
+        "R_near",
+        "obj_x",
+        "obj_y",
+        "obj_z",
+        "tcp_x",
+        "tcp_y",
+        "tcp_z",
+        "ee_x",
+        "ee_y",
+        "ee_z",
+    ):
+        val = dbg.get(key, "")
+        if isinstance(val, bool):
+            row[key] = int(val)
+        else:
+            row[key] = val
+    if info is not None:
+        row["holding"] = info.get("holding") or row["holding"]
+        row["d_robot"] = info.get("d_robot", "")
+        row["d_held"] = info.get("d_held", "")
+        row["d_sys"] = info.get("d_system", "")
+        row["contact_obstacle"] = int(bool(info.get("contact")))
+        row["closest"] = info.get("closest", "")
+    return row
+
+
+def write_hold_trace(rows: list[dict], out_path: Path) -> Path:
+    out_path = out_path.expanduser().resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=HOLD_CSV_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in HOLD_CSV_FIELDS})
+    print(f"Saved {len(rows)} hold-trace rows to {out_path}")
+    return out_path
+
+
 def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_bbox: bool):
     state = {
         "n": 0,
@@ -143,6 +258,7 @@ def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_b
         "d_held": [],
         "holding": [],
         "contact": [],
+        "csv_rows": [],
     }
     orig_step = env.task.scene.step
     state["orig_step"] = orig_step
@@ -150,7 +266,15 @@ def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_b
     def step():
         orig_step()
         state["n"] += 1
-        if state["n"] % max(record_every, 1) != 0:
+        recorded = state["n"] % max(record_every, 1) == 0
+        if not recorded:
+            try:
+                detect_held_object(env)
+                dbg = dict(getattr(env, "_cehj_hold_debug", {}) or {})
+                state["csv_rows"].append(_hold_csv_row(state["n"], 0, dbg))
+            except Exception as exc:
+                if state["n"] <= 2 or state["n"] % 50 == 0:
+                    print(f"\n[record] hold debug failed at step {state['n']}: {exc}")
             return
         try:
             info = distance_info(env)
@@ -167,6 +291,8 @@ def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_b
         state["d_held"].append(info["d_held"])
         state["holding"].append(holding)
         state["contact"].append(contact)
+        dbg = dict(info.get("hold_debug") or getattr(env, "_cehj_hold_debug", {}) or {})
+        state["csv_rows"].append(_hold_csv_row(state["n"], 1, dbg, info))
         obs = env.task.get_obs()["observation"]
         rgb = observer_rgb(env.task)
 
@@ -177,11 +303,19 @@ def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_b
         if plan is None:
             plan = getattr(env.task, "plan_success", None)
         hold_txt = holding if holding else "none"
+        src = dbg.get("source") or "none"
+        fail = dbg.get("fail") or ""
+        hold_extra = f"src={src}"
+        if fail:
+            hold_extra += f" fail={fail}"
+        tcp_obb = dbg.get("tcp_obb")
+        if tcp_obb is not None and np.isfinite(tcp_obb):
+            hold_extra += f" tcp_obb={_cm(tcp_obb)}"
         d_line = f"d_robot={_cm(d_robot)}  d_sys={_cm(d_sys)}"
         if holding:
             d_line += f"  d_held={_cm(info['d_held'])}"
         lines = [
-            f"HOLDING={hold_txt}  contact={int(contact)} {info['closest']}",
+            f"HOLDING={hold_txt}  {hold_extra}  contact={int(contact)} {info['closest']}",
             d_line,
             f"mode={overlay.get('obstacle_mode')} plan={overlay.get('plan_mode')} seed={overlay.get('seed')} expert={plan}",
         ]
@@ -192,7 +326,7 @@ def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_b
         streams["right_wrist_rgb"].append(np.asarray(obs["right_camera"]["rgb"], dtype=np.uint8))
         print(
             f"recorded {len(streams['agent_rgb'])} frames  "
-            f"HOLDING={hold_txt} d_robot={_cm(d_robot)} d_sys={_cm(d_sys)}",
+            f"HOLDING={hold_txt} src={src} d_robot={_cm(d_robot)} d_sys={_cm(d_sys)}",
             end="\r",
         )
 
