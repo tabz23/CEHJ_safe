@@ -283,21 +283,40 @@ def _detect_held_from_contacts(env, actors: dict) -> tuple[object | None, str, s
     return None, "", ""
 
 
+HOLD_MAX_EE_DIST = 0.10  # clear latch if object is farther than this from the EE (slip)
+
+
+def _ee_position(env, side: str) -> np.ndarray:
+    pose = env.robot.get_left_ee_pose() if side == "left" else env.robot.get_right_ee_pose()
+    return np.asarray(pose[:3], dtype=np.float64)
+
+
+def _object_near_ee(env, actor, side: str, max_dist: float = HOLD_MAX_EE_DIST) -> bool:
+    try:
+        obj_p = np.asarray(_resolve_actor(actor).get_pose().p, dtype=np.float64)
+        ee = _ee_position(env, side)
+        return float(np.linalg.norm(obj_p - ee)) <= max_dist
+    except Exception:
+        return False
+
+
 def detect_held_object(env) -> tuple[object | None, str]:
     """Return (actor, label) while a closed gripper holds a task object.
 
-    PhysX contact starts a latch; we keep the object marked held until that
-    arm opens (contact often drops after lift even though the object moves with
-    the gripper).
+    PhysX contact starts a latch. Keep it only while that arm stays closed AND
+    the object remains near the EE (so a slip after hitting the block clears
+    HOLDING quickly without waiting for an open-gripper command).
     """
     if not _arm_is_holding(env, "left") and not _arm_is_holding(env, "right"):
         env._cehj_held_latch = None
         return None, ""
 
     latch = getattr(env, "_cehj_held_latch", None)
-    if latch and not _arm_is_holding(env, latch["side"]):
-        latch = None
-        env._cehj_held_latch = None
+    if latch is not None:
+        side = latch["side"]
+        if not _arm_is_holding(env, side) or not _object_near_ee(env, latch["actor"], side):
+            latch = None
+            env._cehj_held_latch = None
 
     actors = {}
     for name, actor in _iter_task_actors(env):
@@ -312,8 +331,10 @@ def detect_held_object(env) -> tuple[object | None, str]:
         env._cehj_held_latch = {"actor": actor, "label": label, "side": side}
         return actor, label
 
-    if latch and _arm_is_holding(env, latch["side"]):
-        return latch["actor"], latch["label"]
+    if latch is not None and _arm_is_holding(env, latch["side"]):
+        if _object_near_ee(env, latch["actor"], latch["side"]):
+            return latch["actor"], latch["label"]
+        env._cehj_held_latch = None
 
     return None, ""
 

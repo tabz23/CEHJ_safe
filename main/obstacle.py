@@ -347,6 +347,19 @@ def load_collision_spheres(embodiment: str) -> dict:
     return data["collision_spheres"]
 
 
+def keepaways_from_robot(env) -> list[tuple[np.ndarray, float]]:
+    """Keep the block off both arm bases (off_path often drifts toward the robots)."""
+    out = []
+    for entity in (env.robot.left_entity, env.robot.right_entity):
+        try:
+            pose = entity.get_root_pose() if hasattr(entity, "get_root_pose") else entity.get_pose()
+            xy = np.asarray(pose.p[:2], dtype=np.float64)
+        except Exception:
+            continue
+        out.append((xy, 0.18))
+    return out
+
+
 def keepaways_from_task(task, spec: dict) -> list[tuple[np.ndarray, float]]:
     """Keep the block off pick object, place target, and extra grasp objects."""
     names = []
@@ -389,7 +402,7 @@ def choose_and_spawn(
     arm = resolve_arm(env.task, spec, arm)
     p0, p1 = start_target_xy(env.task, spec, env.robot, arm)
     table_z = TABLE_Z + float(getattr(env.task, "table_z_bias", 0.0))
-    keep = keepaways_from_task(env.task, spec)
+    keep = keepaways_from_task(env.task, spec) + keepaways_from_robot(env)
     if keep:
         desc = ", ".join(f"{xy.round(3).tolist()} r={r:.3f}" for xy, r in keep)
         print(f"[obstacle] keepaway {desc}")
