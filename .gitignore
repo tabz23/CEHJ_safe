@@ -1,0 +1,24 @@
+# Videos
+*.mp4
+
+# Experiment outputs
+outputs/
+
+# Nested upstream clone (already its own git repo)
+RoboTwin/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build artifacts
+*.so
+*.o
+
+# Editor / OS
+.DS_Store
+.vscode/
+*.swp
