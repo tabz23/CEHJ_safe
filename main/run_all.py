@@ -31,7 +31,7 @@ from argparse import Namespace
 
 from controller import ResidualController
 from env import CEHJ_ROOT, resolve_embodiment
-from run import CONTROLLERS, run_episode
+from run import CONTROLLERS, run_episode, _level
 from tasks import EMBODIMENTS, SAFETY_TASKS, SWEEP_EMBODIMENTS
 
 ALIASES = {
@@ -95,6 +95,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=10.0)
     parser.add_argument("--arm-distance", type=float, default=0.6)
     parser.add_argument("--controller", default="residual")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip episodes whose summary.json already exists under --output.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Re-run everything even if --resume would skip it.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -162,6 +172,38 @@ def _jobs(args: argparse.Namespace) -> list[dict]:
     return jobs
 
 
+def _job_out_dir(args: argparse.Namespace, job: dict) -> Path:
+    cluttered = bool(args.cluttered)
+    level = _level(args.unsafe_level, job["seed"])
+    tag = (
+        f"{job['obstacle_mode']}_{job['place_mode']}_{job['plan_mode']}_"
+        f"l{level}_seed{job['seed']}"
+    )
+    if cluttered:
+        tag += "_clutter"
+    return (
+        Path(args.output).expanduser()
+        / job["task"]
+        / job["embodiment"]
+        / tag
+    )
+
+
+def _existing_summary(out_dir: Path) -> dict | None:
+    path = out_dir / "summary.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if int(data.get("n_frames") or 0) <= 0 and not data.get("videos"):
+        return None
+    return data
+
+
 def _to_run_args(args: argparse.Namespace, job: dict):
     return Namespace(
         task=job["task"],
@@ -188,13 +230,26 @@ def main() -> None:
     ctrl_cls = CONTROLLERS.get(args.controller, ResidualController)
     ctrl_cls.install()
     jobs = _jobs(args)
-    print(f"{len(jobs)} episodes  preset={args.preset}  output={args.output}")
+    resume = bool(args.resume) and not bool(args.overwrite)
+    n_skip = 0
+    if resume:
+        n_skip = sum(1 for job in jobs if _existing_summary(_job_out_dir(args, job)) is not None)
+    print(
+        f"{len(jobs)} episodes  preset={args.preset}  output={args.output}"
+        + (f"  resume skip={n_skip} remaining={len(jobs) - n_skip}" if resume else "")
+    )
     results = []
     for i, job in enumerate(jobs):
         print(
             f"\n=== [{i + 1}/{len(jobs)}] {job['task']} {job['embodiment']} "
             f"seed={job['seed']} {job['obstacle_mode']} {job['place_mode']} {job['plan_mode']} ==="
         )
+        if resume:
+            existing = _existing_summary(_job_out_dir(args, job))
+            if existing is not None:
+                print(f"[run_all] resume skip  {_job_out_dir(args, job)}")
+                results.append(existing)
+                continue
         if args.dry_run:
             results.append(job)
             continue

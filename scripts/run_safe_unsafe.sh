@@ -16,9 +16,12 @@
 #   bash CEHJ/scripts/run_safe_unsafe.sh --draw-bbox
 #   bash CEHJ/scripts/run_safe_unsafe.sh --embodiments piper,franka
 #   bash CEHJ/scripts/run_safe_unsafe.sh --episodes 2 --base-seed 10
+#   bash CEHJ/scripts/run_safe_unsafe.sh            # resumes; skips finished summary.json
+#   bash CEHJ/scripts/run_safe_unsafe.sh --overwrite  # re-run everything
 set -euo pipefail
 ROOT="/storage1/fs1/sibai/Active/yuxuan/cross_embodiment/CEHJ"
 export PYTHONNOUSERSITE=1
+
 python "${ROOT}/main/run_all.py" \
   --preset grid \
   --tasks all \
@@ -30,5 +33,6 @@ python "${ROOT}/main/run_all.py" \
   --episodes 1 \
   --base-seed 0 \
   --output "${ROOT}/outputs/ihab/safe_unsafe" \
-  --draw-bbox  \
+  --draw-bbox \
+  --resume \
   "$@"
