@@ -95,60 +95,103 @@ def min_robot_obstacle_distance(env) -> tuple[float, bool, str]:
     return info["d_robot"], info["contact"], info["closest"]
 
 
+def _finite_min(vals) -> float:
+    nums = [float(v) for v in vals if v is not None and np.isfinite(v)]
+    return float(min(nums)) if nums else float("inf")
+
+
+def _arm_sphere_distance(env, side: str, origin, rot, half, spheres) -> tuple[float, str]:
+    entity = env.robot.left_entity if side == "left" else env.robot.right_entity
+    prefix = "L" if side == "left" else "R"
+    best = float("inf")
+    closest = ""
+    for center, radius, link_name in spheres_with_names(entity, spheres):
+        d = point_obb_signed_distance(center, origin, rot, half) - radius
+        if d < best:
+            best = d
+            closest = f"{prefix}/{link_name}"
+    return best, closest
+
+
 def distance_info(env) -> dict:
-    """Robot-only and system (robot + held object) distances to the wooden block."""
-    held_actor, holding = detect_held_object(env)
+    """Per-arm robot and held-object distances to the wooden block."""
+    held = detect_held_by_arm(env)
     hold_dbg = dict(getattr(env, "_cehj_hold_debug", {}) or {})
+    left_actor, left_label = held.get("left") or (None, "")
+    right_actor, right_label = held.get("right") or (None, "")
+    holding = _holding_text(left_label, right_label)
     out = {
+        "d_left": float("inf"),
+        "d_right": float("inf"),
+        "d_left_held": float("inf"),
+        "d_right_held": float("inf"),
+        "d_min": float("inf"),
         "d_robot": float("inf"),
         "d_held": float("inf"),
         "d_system": float("inf"),
         "contact": False,
         "closest": "",
         "holding": holding,
-        "held_actor": held_actor,
+        "holding_left": left_label,
+        "holding_right": right_label,
+        "held_actor": left_actor or right_actor,
+        "held_left": left_actor,
+        "held_right": right_actor,
         "hold_debug": hold_dbg,
     }
     obstacle = getattr(env, "obstacle", None)
     if obstacle is None:
         return out
     spheres = load_collision_spheres(env.embodiment)
-    labeled = []
-    for side, entity in (("L", env.robot.left_entity), ("R", env.robot.right_entity)):
-        for center, radius, link_name in spheres_with_names(entity, spheres):
-            labeled.append((center, radius, f"{side}/{link_name}"))
     origin, rot, half = _obb_from_actor(obstacle, getattr(env, "obstacle_half", None))
-    d_robot = float("inf")
-    closest = ""
-    for center, radius, label in labeled:
-        d = point_obb_signed_distance(center, origin, rot, half) - radius
-        if d < d_robot:
-            d_robot = d
-            closest = label
-    d_held = float("inf")
-    if held_actor is not None:
+    d_left, closest_l = _arm_sphere_distance(env, "left", origin, rot, half, spheres)
+    d_right, closest_r = _arm_sphere_distance(env, "right", origin, rot, half, spheres)
+    d_left_held = float("inf")
+    d_right_held = float("inf")
+    closest = closest_l if d_left <= d_right else closest_r
+    if left_actor is not None:
         try:
-            d_held = _actor_obb_distance(held_actor, origin, rot, half)
-            if d_held < d_robot:
-                closest = f"held/{holding}"
+            d_left_held = _actor_obb_distance(left_actor, origin, rot, half)
+            if d_left_held < _finite_min([d_left, d_right, d_right_held]):
+                closest = f"held_L/{left_label}"
         except (TypeError, AttributeError):
-            held_actor, holding = None, ""
-            d_held = float("inf")
-            out["held_actor"] = None
-            out["holding"] = ""
-    d_system = d_robot if held_actor is None else min(d_robot, d_held)
+            d_left_held = float("inf")
+            left_actor, left_label = None, ""
+    if right_actor is not None:
+        try:
+            d_right_held = _actor_obb_distance(right_actor, origin, rot, half)
+            if d_right_held < _finite_min([d_left, d_right, d_left_held]):
+                closest = f"held_R/{right_label}"
+        except (TypeError, AttributeError):
+            d_right_held = float("inf")
+            right_actor, right_label = None, ""
+    d_robot = _finite_min([d_left, d_right])
+    d_held = _finite_min([d_left_held, d_right_held])
+    d_min = _finite_min([d_left, d_right, d_left_held, d_right_held])
     contact = _robot_obstacle_contact(env)
-    if held_actor is not None and not contact:
-        contact = _held_obstacle_contact(env, held_actor)
+    if not contact and left_actor is not None:
+        contact = _held_obstacle_contact(env, left_actor)
+    if not contact and right_actor is not None:
+        contact = _held_obstacle_contact(env, right_actor)
+    holding = _holding_text(left_label, right_label)
     out.update(
         {
+            "d_left": d_left,
+            "d_right": d_right,
+            "d_left_held": d_left_held,
+            "d_right_held": d_right_held,
+            "d_min": d_min,
             "d_robot": d_robot,
             "d_held": d_held,
-            "d_system": d_system,
+            "d_system": d_min,
             "contact": contact,
             "closest": closest,
             "holding": holding,
-            "held_actor": held_actor,
+            "holding_left": left_label,
+            "holding_right": right_label,
+            "held_actor": left_actor or right_actor,
+            "held_left": left_actor,
+            "held_right": right_actor,
         }
     )
     return out
@@ -214,33 +257,27 @@ def _entity_ids(actor) -> set[int]:
     return ids
 
 
+def _holding_text(left_label: str, right_label: str) -> str:
+    parts = []
+    if left_label:
+        parts.append(f"L={left_label}")
+    if right_label:
+        parts.append(f"R={right_label}")
+    return " ".join(parts)
+
+
 def _iter_task_actors(env):
-    from tasks import TASK_SPECS
+    from tasks import TASK_SPECS, iter_named_actors, spec_grasp_names
 
     spec = TASK_SPECS.get(getattr(env, "task_name", ""), {})
-    names: list[str] = []
-    if spec.get("object"):
-        names.append(spec["object"])
-    for extra in spec.get("grasp_objects", ()):
-        if extra not in names:
-            names.append(extra)
-    if getattr(env, "task_name", "") == "stack_blocks_two" and "block2" not in names:
-        names.append("block2")
-    seen = set()
-    for name in names:
-        if not hasattr(env.task, name):
-            continue
-        actor = getattr(env.task, name)
-        if actor is None or actor is getattr(env, "obstacle", None):
+    obstacle = getattr(env, "obstacle", None)
+    for name, actor in iter_named_actors(env.task, spec_grasp_names(spec)):
+        if actor is None or actor is obstacle:
             continue
         try:
             _resolve_actor(actor)
         except TypeError:
             continue
-        key = id(actor)
-        if key in seen:
-            continue
-        seen.add(key)
         yield name, actor
 
 
@@ -285,11 +322,13 @@ def _is_gripper_entity(env, entity) -> bool:
     return name in gripper or is_gripper_link(name)
 
 
-def _detect_held_from_contacts(env, items: list[tuple[str, object, set]]) -> tuple[object | None, str, str]:
+def _detect_held_from_contacts(env, items: list[tuple[str, object, set]]) -> dict[str, tuple]:
+    found: dict[str, tuple] = {}
     try:
         contacts = env.task.scene.get_contacts()
     except Exception:
-        return None, "", ""
+        return found
+    claimed: set[int] = set()
     for contact in contacts:
         bodies = contact.bodies
         for i in range(2):
@@ -298,7 +337,7 @@ def _detect_held_from_contacts(env, items: list[tuple[str, object, set]]) -> tup
             match = None
             for label, actor, keys in items:
                 if oid in keys:
-                    match = (label, actor)
+                    match = (label, actor, keys)
                     break
             if match is None:
                 continue
@@ -308,18 +347,27 @@ def _detect_held_from_contacts(env, items: list[tuple[str, object, set]]) -> tup
             side = _entity_side(env, gripper_body.entity)
             if side is None or not _arm_is_holding(env, side):
                 continue
-            label, actor = match
-            return actor, label, side
-    return None, "", ""
+            if side in found:
+                continue
+            label, actor, keys = match
+            if claimed & keys:
+                continue
+            found[side] = (actor, label)
+            claimed |= keys
+    return found
 
 
-def _detect_held_from_near(env, items: list[tuple[str, object, set]]):
+def _detect_held_from_near(env, items: list[tuple[str, object, set]], claimed: set[int] | None = None):
     """Closed gripper whose TCP/fingers sit on a task-object OBB (no PhysX contact needed)."""
-    best = None
-    best_d = float("inf")
-    for label, actor, _keys in items:
-        for side in ("left", "right"):
-            if not _arm_is_holding(env, side):
+    claimed = set(claimed or ())
+    found: dict[str, tuple] = {}
+    for side in ("left", "right"):
+        if not _arm_is_holding(env, side):
+            continue
+        best = None
+        best_d = float("inf")
+        for label, actor, keys in items:
+            if claimed & keys:
                 continue
             metrics = _hold_metrics(env, actor, side)
             if not metrics["near"]:
@@ -328,9 +376,13 @@ def _detect_held_from_near(env, items: list[tuple[str, object, set]]):
             if not np.isfinite(dist):
                 dist = metrics["tcp_obb"]
             if dist < best_d:
-                best = (actor, label, side, metrics)
+                best = (actor, label, metrics, keys)
                 best_d = dist
-    return best
+        if best is not None:
+            actor, label, metrics, keys = best
+            found[side] = (actor, label, metrics)
+            claimed |= keys
+    return found
 
 
 # Stay/slip uses TCP / gripper spheres vs the object OBB, not wrist-origin Euclidean.
@@ -444,11 +496,17 @@ def _empty_hold_debug() -> dict:
         "L_tcp_obb": float("nan"),
         "L_grip_obb": float("nan"),
         "L_near": False,
+        "L_source": "none",
+        "L_fail": "",
         "R_origin_dist_ee": float("nan"),
         "R_origin_dist_tcp": float("nan"),
         "R_tcp_obb": float("nan"),
         "R_grip_obb": float("nan"),
         "R_near": False,
+        "R_source": "none",
+        "R_fail": "",
+        "holding_left": "",
+        "holding_right": "",
         "obj_x": float("nan"),
         "obj_y": float("nan"),
         "obj_z": float("nan"),
@@ -495,87 +553,161 @@ def _apply_side_metrics(debug: dict, metrics: dict) -> None:
         debug[key] = metrics[key]
 
 
-def detect_held_object(env) -> tuple[object | None, str]:
-    """Return (actor, label) while a closed gripper holds a task object.
-
-    PhysX gripper↔object contact starts a latch. Keep it while that arm stays
-    closed AND the gripper/TCP is still on the object OBB (so a slip after
-    hitting the block clears HOLDING without waiting for an open-gripper command).
-    Wrist-origin Euclidean is logged only; it is not the stay/slip test.
-    """
+def detect_held_by_arm(env) -> dict[str, tuple | None]:
+    """Per-arm latch: PhysX contact starts it; stay while closed and TCP/fingers on OBB."""
     debug = _empty_hold_debug()
     debug["left_holding"] = _arm_is_holding(env, "left")
     debug["right_holding"] = _arm_is_holding(env, "right")
     debug["left_grip"] = _gripper_value(env, "left")
     debug["right_grip"] = _gripper_value(env, "right")
 
-    primary = None
     items: list[tuple[str, object, set]] = []
     for name, actor in _iter_task_actors(env):
-        if primary is None:
-            primary = actor
         items.append((name, actor, _entity_ids(actor)))
-    _fill_both_arm_metrics(env, primary, debug)
 
-    def _finish(actor=None, label=""):
-        debug["holding"] = label
+    latch = getattr(env, "_cehj_held_latch", None)
+    if not isinstance(latch, dict) or ("left" not in latch and "right" not in latch):
+        latch = {"left": None, "right": None}
+
+    result: dict[str, tuple | None] = {"left": None, "right": None}
+
+    def _finish():
+        debug["holding_left"] = result["left"][1] if result["left"] else ""
+        debug["holding_right"] = result["right"][1] if result["right"] else ""
+        debug["holding"] = _holding_text(debug["holding_left"], debug["holding_right"])
+        debug["side"] = "both" if result["left"] and result["right"] else (
+            "left" if result["left"] else ("right" if result["right"] else "")
+        )
         env._cehj_hold_debug = debug
-        return actor, label
+        env._cehj_held_latch = {
+            "left": None if result["left"] is None else {
+                "actor": result["left"][0],
+                "label": result["left"][1],
+                "side": "left",
+            },
+            "right": None if result["right"] is None else {
+                "actor": result["right"][0],
+                "label": result["right"][1],
+                "side": "right",
+            },
+        }
+        return result
 
     if not debug["left_holding"] and not debug["right_holding"]:
-        env._cehj_held_latch = None
         debug["fail"] = "grippers_open"
+        debug["L_fail"] = "arm_open"
+        debug["R_fail"] = "arm_open"
         return _finish()
 
     if not items:
-        env._cehj_held_latch = None
         debug["fail"] = "no_actors"
         return _finish()
 
-    actor, label, side = _detect_held_from_contacts(env, items)
-    debug["contact_grip_obj"] = actor is not None
-    if actor is not None:
-        metrics = _hold_metrics(env, actor, side)
-        _apply_side_metrics(debug, metrics)
-        _fill_both_arm_metrics(env, actor, debug)
-        debug["source"] = "contact"
-        debug["side"] = side
-        env._cehj_held_latch = {"actor": actor, "label": label, "side": side}
-        return _finish(actor, label)
+    contacts = _detect_held_from_contacts(env, items)
+    debug["contact_grip_obj"] = bool(contacts)
+    claimed: set[int] = set()
+    for side in ("left", "right"):
+        prefix = "L" if side == "left" else "R"
+        if not debug[f"{side}_holding"]:
+            debug[f"{prefix}_fail"] = "arm_open"
+            debug[f"{prefix}_source"] = "none"
+            continue
+        if side in contacts:
+            actor, label = contacts[side]
+            metrics = _hold_metrics(env, actor, side)
+            result[side] = (actor, label)
+            claimed |= _entity_ids(actor)
+            debug[f"{prefix}_source"] = "contact"
+            debug[f"{prefix}_fail"] = ""
+            if side == "left":
+                _apply_side_metrics(debug, metrics)
+            for key, val in (
+                ("origin_dist_ee", metrics["origin_dist_ee"]),
+                ("origin_dist_tcp", metrics["origin_dist_tcp"]),
+                ("tcp_obb", metrics["tcp_obb"]),
+                ("grip_obb", metrics["grip_obb"]),
+                ("near", metrics["near"]),
+            ):
+                debug[f"{prefix}_{key}"] = val
+            continue
+        prev = latch.get(side)
+        if prev is not None:
+            metrics = _hold_metrics(env, prev["actor"], side)
+            debug[f"{prefix}_near"] = metrics["near"]
+            debug[f"{prefix}_tcp_obb"] = metrics["tcp_obb"]
+            debug[f"{prefix}_grip_obb"] = metrics["grip_obb"]
+            debug[f"{prefix}_origin_dist_ee"] = metrics["origin_dist_ee"]
+            debug[f"{prefix}_origin_dist_tcp"] = metrics["origin_dist_tcp"]
+            if metrics["near"]:
+                result[side] = (prev["actor"], prev["label"])
+                claimed |= _entity_ids(prev["actor"])
+                debug[f"{prefix}_source"] = "latch"
+                debug[f"{prefix}_fail"] = ""
+                if side == "left":
+                    _apply_side_metrics(debug, metrics)
+                continue
+            debug[f"{prefix}_fail"] = "not_near"
+            debug[f"{prefix}_source"] = "none"
 
-    latch = getattr(env, "_cehj_held_latch", None)
-    if latch is not None:
-        side = latch["side"]
-        metrics = _hold_metrics(env, latch["actor"], side)
-        _apply_side_metrics(debug, metrics)
-        _fill_both_arm_metrics(env, latch["actor"], debug)
-        debug["side"] = side
-        arm_ok = _arm_is_holding(env, side)
-        if arm_ok and metrics["near"]:
-            debug["source"] = "latch"
-            env._cehj_held_latch = latch
-            return _finish(latch["actor"], latch["label"])
-        debug["fail"] = "arm_open" if not arm_ok else "not_near"
-        env._cehj_held_latch = None
+    near_hits = _detect_held_from_near(env, items, claimed)
+    for side, hit in near_hits.items():
+        if result[side] is not None:
+            continue
+        actor, label, metrics = hit
+        prefix = "L" if side == "left" else "R"
+        result[side] = (actor, label)
+        claimed |= _entity_ids(actor)
+        debug[f"{prefix}_source"] = "near"
+        debug[f"{prefix}_fail"] = ""
+        debug[f"{prefix}_near"] = metrics["near"]
+        debug[f"{prefix}_tcp_obb"] = metrics["tcp_obb"]
+        debug[f"{prefix}_grip_obb"] = metrics["grip_obb"]
+        debug[f"{prefix}_origin_dist_ee"] = metrics["origin_dist_ee"]
+        debug[f"{prefix}_origin_dist_tcp"] = metrics["origin_dist_tcp"]
+        if side == "left":
+            _apply_side_metrics(debug, metrics)
 
-    near_hit = _detect_held_from_near(env, items)
-    if near_hit is not None:
-        actor, label, side, metrics = near_hit
-        _apply_side_metrics(debug, metrics)
-        _fill_both_arm_metrics(env, actor, debug)
-        debug["source"] = "near"
-        debug["side"] = side
+    for side in ("left", "right"):
+        prefix = "L" if side == "left" else "R"
+        actor = result[side][0] if result[side] else None
+        if actor is None and items:
+            actor = items[0][1]
+        if actor is not None and not np.isfinite(debug.get(f"{prefix}_tcp_obb", float("nan"))):
+            m = _hold_metrics(env, actor, side)
+            debug[f"{prefix}_origin_dist_ee"] = m["origin_dist_ee"]
+            debug[f"{prefix}_origin_dist_tcp"] = m["origin_dist_tcp"]
+            debug[f"{prefix}_tcp_obb"] = m["tcp_obb"]
+            debug[f"{prefix}_grip_obb"] = m["grip_obb"]
+            debug[f"{prefix}_near"] = m["near"]
+        if result[side] is None and debug[f"{side}_holding"] and not debug.get(f"{prefix}_fail"):
+            debug[f"{prefix}_fail"] = "no_contact"
+            debug[f"{prefix}_source"] = "none"
+
+    if result["left"] is None and result["right"] is None:
+        debug["fail"] = debug.get("L_fail") or debug.get("R_fail") or "no_contact"
+        debug["source"] = "none"
+    elif result["left"] and result["right"]:
+        debug["source"] = "both"
         debug["fail"] = ""
-        env._cehj_held_latch = {"actor": actor, "label": label, "side": side}
-        return _finish(actor, label)
-
-    debug["fail"] = debug.get("fail") or "no_contact"
-    if primary is not None:
-        _fill_both_arm_metrics(env, primary, debug)
-        closed = "left" if debug["left_holding"] else "right"
-        _apply_side_metrics(debug, _hold_metrics(env, primary, closed))
-        debug["side"] = closed
+    else:
+        side = "left" if result["left"] else "right"
+        prefix = "L" if side == "left" else "R"
+        debug["source"] = debug.get(f"{prefix}_source") or "none"
+        debug["fail"] = ""
+        debug["near"] = debug.get(f"{prefix}_near")
+        debug["tcp_obb"] = debug.get(f"{prefix}_tcp_obb")
+        debug["grip_obb"] = debug.get(f"{prefix}_grip_obb")
     return _finish()
+
+
+def detect_held_object(env) -> tuple[object | None, str]:
+    """Return one (actor, label) for overlays that still expect a single hold."""
+    held = detect_held_by_arm(env)
+    if held.get("left"):
+        return held["left"]
+    if held.get("right"):
+        return held["right"]
+    return None, ""
 
 
 def _actor_obb_distance(actor, origin, rot, half) -> float:

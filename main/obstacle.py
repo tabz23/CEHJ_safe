@@ -9,7 +9,16 @@ from typing import Iterable
 import numpy as np
 import yaml
 
-from tasks import TASK_SPECS, resolve_arm, start_target_xy
+from tasks import (
+    TASK_SPECS,
+    iter_corridors,
+    iter_named_actors,
+    longest_corridor,
+    resolve_arm,
+    spec_grasp_names,
+    start_target_xy,
+    target_xy,
+)
 
 OBSTACLE_NAME = "safety_obstacle"
 OBSTACLE_MODEL = "086_woodenblock"
@@ -465,20 +474,14 @@ def keepaways_from_robot(env) -> list[tuple[np.ndarray, float]]:
 
 def keepaways_from_task(task, spec: dict) -> list[tuple[np.ndarray, float]]:
     """Keep the block off pick object, place target, and extra grasp objects."""
-    names = []
-    for key in ("object", "target"):
-        name = spec.get(key)
-        if name and name not in names:
-            names.append(name)
-    for extra in spec.get("grasp_objects", ()):
-        if extra not in names:
-            names.append(extra)
+    names = spec_grasp_names(spec)
+    tgt = spec.get("target")
+    if tgt and tgt not in names:
+        names.append(tgt)
     out: list[tuple[np.ndarray, float]] = []
     seen = set()
-    for name in names:
-        if not hasattr(task, name):
-            continue
-        entry = _keepaway_entry(getattr(task, name))
+    for name, actor in iter_named_actors(task, names):
+        entry = _keepaway_entry(actor)
         if entry is None:
             continue
         xy, radius = entry
@@ -487,7 +490,114 @@ def keepaways_from_task(task, spec: dict) -> list[tuple[np.ndarray, float]]:
             continue
         seen.add(key)
         out.append((xy, radius))
+    if tgt:
+        try:
+            xy = target_xy(task, tgt)
+            key = (round(float(xy[0]), 3), round(float(xy[1]), 3))
+            if key not in seen:
+                seen.add(key)
+                out.append((xy, 0.06))
+        except Exception:
+            pass
     return out
+
+
+STRETCH_XYLIM = np.array([[-0.30, 0.30], [-0.22, 0.16]], dtype=np.float64)
+STRETCH_MIN_DEFAULT = 0.22
+STRETCH_PAIR_GAP = 0.10
+
+
+def _actor_set_xy(actor, xy: np.ndarray) -> None:
+    import sapien
+
+    inner = getattr(actor, "actor", actor)
+    pose = inner.get_pose()
+    inner.set_pose(sapien.Pose([float(xy[0]), float(xy[1]), float(pose.p[2])], pose.q))
+
+
+def _clip_stretch_xy(xy: np.ndarray) -> np.ndarray:
+    out = np.asarray(xy[:2], dtype=np.float64).copy()
+    out[0] = np.clip(out[0], STRETCH_XYLIM[0, 0], STRETCH_XYLIM[0, 1])
+    out[1] = np.clip(out[1], STRETCH_XYLIM[1, 0], STRETCH_XYLIM[1, 1])
+    if abs(out[0]) < 0.06:
+        out[0] = 0.06 if out[0] >= 0 else -0.06
+    return out
+
+
+def _stretch_one(actor, p1: np.ndarray, min_dist: float, others: list[np.ndarray]) -> np.ndarray:
+    p0 = _pose_xyz(actor)[:2]
+    p1 = np.asarray(p1[:2], dtype=np.float64)
+    delta = p0 - p1
+    dist = float(np.linalg.norm(delta))
+    if dist < 1e-4:
+        delta = np.array([np.sign(p0[0]) or 1.0, 0.0], dtype=np.float64)
+        dist = 1.0
+    direction = delta / dist
+    if dist >= min_dist:
+        xy = p0.copy()
+    else:
+        xy = _clip_stretch_xy(p1 + direction * min_dist)
+        if float(np.linalg.norm(xy - p1)) < min_dist * 0.85:
+            xy = _clip_stretch_xy(p0 + direction * (min_dist - dist + 0.02))
+    for other in others:
+        sep = xy - np.asarray(other[:2], dtype=np.float64)
+        if float(np.linalg.norm(sep)) < STRETCH_PAIR_GAP:
+            n = sep if float(np.linalg.norm(sep)) > 1e-4 else direction
+            n = n / (float(np.linalg.norm(n)) + 1e-8)
+            xy = _clip_stretch_xy(xy + n * STRETCH_PAIR_GAP)
+    if float(np.linalg.norm(xy - p0)) > 0.005:
+        _actor_set_xy(actor, xy)
+    return xy
+
+
+def _bias_opposite_sides(pick_actors: list[tuple[str, object]]) -> None:
+    if len(pick_actors) < 2:
+        return
+    xs = [float(_pose_xyz(actor)[0]) for _label, actor in pick_actors[:2]]
+    if xs[0] * xs[1] < 0:
+        return
+    _label, actor = pick_actors[1]
+    pose = _pose_xyz(actor)
+    new_x = -abs(float(pose[0])) if xs[0] > 0 else abs(float(pose[0]))
+    if abs(new_x) < 0.12:
+        new_x = -0.22 if xs[0] > 0 else 0.22
+    _actor_set_xy(actor, np.array([new_x, float(pose[1])], dtype=np.float64))
+    print(f"[spawn] bias opposite sides: {_label} x {pose[0]:.3f} -> {new_x:.3f}")
+
+
+def stretch_task_spawns(env) -> None:
+    """Nudge pick objects away from place targets so an on_path block can fit."""
+    spec = TASK_SPECS.get(getattr(env, "task_name", ""), {})
+    min_dist = float(spec.get("stretch_min") or 0.0)
+    if min_dist <= 0:
+        return
+    corridors = iter_corridors(env.task, spec)
+    if not corridors:
+        return
+    pick_actors = list(iter_named_actors(env.task, spec_grasp_names(spec)))
+    if spec.get("bias_opposite"):
+        _bias_opposite_sides(pick_actors)
+        corridors = iter_corridors(env.task, spec)
+    placed: list[np.ndarray] = []
+    by_label = {label: actor for label, actor in pick_actors}
+    for _p0, _p1, label, tgt_name in corridors:
+        actor = by_label.get(label)
+        if actor is None:
+            continue
+        if tgt_name in by_label and by_label[tgt_name] is actor:
+            continue
+        try:
+            p1 = target_xy(env.task, tgt_name)
+        except Exception:
+            p1 = _p1
+        before = _pose_xyz(actor)[:2]
+        after = _stretch_one(actor, p1, min_dist, placed)
+        placed.append(after)
+        print(
+            f"[spawn] stretch {label}: {before.round(3).tolist()} -> {after.round(3).tolist()} "
+            f"vs {tgt_name} {np.asarray(p1[:2]).round(3).tolist()} "
+            f"|d|={float(np.linalg.norm(after - p1)):.3f}"
+        )
 
 
 def choose_and_spawn(
@@ -503,7 +613,9 @@ def choose_and_spawn(
         return None, None, None, arm
     spec = TASK_SPECS[env.task_name]
     arm = resolve_arm(env.task, spec, arm)
-    p0, p1 = start_target_xy(env.task, spec, env.robot, arm)
+    p0, p1, arm_hint = longest_corridor(env.task, spec, env.robot, arm)
+    if spec.get("corridors"):
+        arm = arm_hint
     table_z = TABLE_Z + float(getattr(env.task, "table_z_bias", 0.0))
     task_keep = keepaways_from_task(env.task, spec)
     robot_keep = keepaways_from_robot(env)

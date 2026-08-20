@@ -3,10 +3,13 @@
 
 Params and options (also `python run.py --help`):
 
-  --task              One of the 10 safety tasks (default: place_empty_cup).
-                      place_empty_cup, move_can_pot, place_can_basket,
+  --task              One of the CEHJ tasks (default: place_empty_cup).
+                      Safety set: place_empty_cup, move_can_pot, place_can_basket,
                       place_container_plate, place_shoe, stack_blocks_two,
                       place_object_stand, place_mouse_pad, click_bell, press_stapler
+                      Bimanual set: place_burger_fries, place_cans_plasticbox,
+                      stack_blocks_two, place_can_basket, place_bread_basket,
+                      place_bread_skillet, pick_dual_bottles, stack_bowls_two
 
   --embodiment        Dual-arm robot (default: piper).
                       piper | franka | ur5 | arx
@@ -66,10 +69,10 @@ if str(MAIN_DIR) not in sys.path:
     sys.path.insert(0, str(MAIN_DIR))
 
 from controller import CuroboIKController, ResidualController
-from env import CEHJ_ROOT, Env
+from env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE, Env
 from obstacle import choose_and_spawn, update_curobo_world
 from record import attach_recorder, detach_recorder, save_video, write_hold_trace
-from tasks import SAFETY_TASKS, resolve_arm, TASK_SPECS
+from tasks import ALL_TASKS, resolve_arm, TASK_SPECS
 
 CONTROLLERS = {
     "residual": ResidualController,
@@ -84,7 +87,7 @@ def parse_args() -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--task", default="place_empty_cup", choices=SAFETY_TASKS)
+    parser.add_argument("--task", default="place_empty_cup", choices=ALL_TASKS)
     parser.add_argument("--embodiment", default="piper")
     parser.add_argument("--seed", type=int, default=0, help="Scene RNG. Change for a new layout.")
     parser.add_argument("--arm-distance", type=float, default=0.6)
@@ -105,6 +108,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--arm", choices=("auto", "left", "right"), default="auto")
     parser.add_argument("--draw-bbox", action="store_true")
     parser.add_argument("--controller", choices=tuple(CONTROLLERS), default="residual")
+    parser.add_argument(
+        "--msaa",
+        type=int,
+        default=DEFAULT_MSAA,
+        help="SAPIEN raster MSAA. Default 2. 1 is stock; 4/8 is slower.",
+    )
+    parser.add_argument(
+        "--video-res",
+        default=f"{RECORD_SIZE[0]}x{RECORD_SIZE[1]}",
+        help="Saved video WxH (default 320x240). Observer renders at 2x then downsamples.",
+    )
     parser.add_argument("--record-every", type=int, default=8)
     parser.add_argument("--fps", type=float, default=10.0)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -122,10 +136,22 @@ def _level(value: str, seed: int) -> int:
     return lvl
 
 
+def _video_res(value: str) -> tuple[int, int]:
+    text = str(value).lower().replace(" ", "")
+    if "x" not in text:
+        raise ValueError("--video-res must look like 320x240")
+    w, h = text.split("x", 1)
+    width, height = int(w), int(h)
+    if width < 2 or height < 2 or width % 2 or height % 2:
+        raise ValueError("--video-res must be even positive integers")
+    return width, height
+
+
 def _make_env(args: argparse.Namespace, seed: int) -> tuple[object, object]:
     cluttered = bool(args.cluttered) and not bool(args.no_cluttered)
     ctrl_cls = CONTROLLERS[args.controller]
     ctrl_cls.install()
+    record_wh = _video_res(getattr(args, "video_res", f"{RECORD_SIZE[0]}x{RECORD_SIZE[1]}"))
     env = Env(
         args.task,
         args.embodiment,
@@ -133,6 +159,9 @@ def _make_env(args: argparse.Namespace, seed: int) -> tuple[object, object]:
         args.arm_distance,
         cluttered=cluttered,
         settle=True,
+        msaa=int(getattr(args, "msaa", DEFAULT_MSAA)),
+        observer_size=(record_wh[0] * 2, record_wh[1] * 2),
+        record_size=record_wh,
     )
     ctrl = ctrl_cls(env)
     ctrl.attach()
@@ -243,12 +272,19 @@ def run_episode(args: argparse.Namespace) -> dict:
     d_min = _min_finite(rec["d_min"])
     d_robot = _min_finite(rec.get("d_robot", rec["d_min"]))
     d_system = _min_finite(rec.get("d_system", rec["d_min"]))
+    d_left = _min_finite(rec.get("d_left", []))
+    d_right = _min_finite(rec.get("d_right", []))
+    d_left_held = _min_finite(rec.get("d_left_held", []))
+    d_right_held = _min_finite(rec.get("d_right_held", []))
     held_labels = [h for h in rec.get("holding", []) if h]
+    held_left = [h for h in rec.get("holding_left", []) if h]
+    held_right = [h for h in rec.get("holding_right", []) if h]
     any_contact = bool(any(rec["contact"]))
     print(
         f"success={success} plan_success={plan_success} "
-        f"d_robot={d_robot} d_sys={d_system} contact={any_contact} "
-        f"held={held_labels[-1] if held_labels else None} frames={len(streams['agent_rgb'])}"
+        f"dL={d_left} dR={d_right} dLh={d_left_held} dRh={d_right_held} dmin={d_min} "
+        f"contact={any_contact} held={held_labels[-1] if held_labels else None} "
+        f"frames={len(streams['agent_rgb'])}"
     )
 
     tag = (
@@ -282,7 +318,13 @@ def run_episode(args: argparse.Namespace) -> dict:
         "d_min": None if not np.isfinite(d_min) else d_min,
         "d_robot": None if not np.isfinite(d_robot) else d_robot,
         "d_system": None if not np.isfinite(d_system) else d_system,
+        "d_left": None if not np.isfinite(d_left) else d_left,
+        "d_right": None if not np.isfinite(d_right) else d_right,
+        "d_left_held": None if not np.isfinite(d_left_held) else d_left_held,
+        "d_right_held": None if not np.isfinite(d_right_held) else d_right_held,
         "held_object": held_labels[-1] if held_labels else None,
+        "held_left": held_left[-1] if held_left else None,
+        "held_right": held_right[-1] if held_right else None,
         "contact": any_contact,
         "play_error": play_error,
         "obstacle_xyz": None if xyz is None else xyz.tolist(),

@@ -19,7 +19,7 @@ if str(MAIN_DIR) not in sys.path:
     sys.path.insert(0, str(MAIN_DIR))
 
 from controller import CuroboIKController, ResidualController
-from env import CEHJ_ROOT, Env
+from env import CEHJ_ROOT, Env, RECORD_SIZE
 
 CONTROLLERS = {
     "residual": ResidualController,
@@ -51,7 +51,13 @@ def _observer_rgb(task) -> np.ndarray:
     cam = task.cameras.observer_camera
     cam.take_picture()
     rgba = cam.get_picture("Color")
-    return (rgba * 255).clip(0, 255).astype("uint8")[:, :, :3]
+    rgb = (rgba * 255).clip(0, 255).astype("uint8")[:, :, :3]
+    tw, th = RECORD_SIZE
+    if rgb.shape[1] == tw and rgb.shape[0] == th:
+        return rgb
+    import cv2
+
+    return cv2.resize(rgb, (tw, th), interpolation=cv2.INTER_AREA)
 
 
 def attach_recorder(task, streams: dict, record_every: int) -> None:
@@ -85,6 +91,7 @@ def save_video(frames, out_path: Path, fps: float) -> Path:
             codec="libx264",
             format="FFMPEG",
             pixelformat="yuv420p",
+            ffmpeg_params=["-crf", "17", "-preset", "medium"],
             macro_block_size=1,
         )
         for frame in video:

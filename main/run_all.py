@@ -32,7 +32,7 @@ from argparse import Namespace
 from controller import ResidualController
 from env import CEHJ_ROOT, resolve_embodiment
 from run import CONTROLLERS, run_episode, _level
-from tasks import EMBODIMENTS, SAFETY_TASKS, SWEEP_EMBODIMENTS
+from tasks import BIMANUAL_TASKS, EMBODIMENTS, SAFETY_TASKS, SWEEP_EMBODIMENTS
 
 ALIASES = {
     "piper": "piper",
@@ -58,7 +58,7 @@ def _split(value: str, allowed: tuple[str, ...]) -> list[str]:
             continue
         if key in ALIASES:
             key = ALIASES[key]
-        if key not in allowed and key not in SAFETY_TASKS:
+        if key not in allowed and key not in SAFETY_TASKS and key not in BIMANUAL_TASKS:
             mapped = ALIASES.get(key.lower(), key)
             key = mapped
         out.append(key)
@@ -77,6 +77,12 @@ def parse_args() -> argparse.Namespace:
         help="smoke=cup×piper×3 modes; grid=10×4×3; discussed=grid + on_path replan + waypoint sample",
     )
     parser.add_argument("--tasks", default="all")
+    parser.add_argument(
+        "--task-set",
+        choices=("safety", "bimanual"),
+        default="safety",
+        help="Which list --tasks all uses. safety=10 original; bimanual=8 dual-arm.",
+    )
     parser.add_argument("--embodiments", default="all")
     parser.add_argument("--obstacle-modes", default="none,off_path,on_path")
     parser.add_argument("--place-mode", default="geometric", choices=("geometric", "waypoint"))
@@ -110,20 +116,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def _jobs(args: argparse.Namespace) -> list[dict]:
+    task_pool = BIMANUAL_TASKS if args.task_set == "bimanual" else SAFETY_TASKS
     if args.preset == "smoke":
-        tasks = ["place_empty_cup"]
+        tasks = ["place_empty_cup"] if args.task_set != "bimanual" else ["place_burger_fries"]
         embs = ["piper"]
         modes = ["none", "off_path", "on_path"]
         extra_plan = []
         extra_place = []
     elif args.preset == "discussed":
-        tasks = _split(args.tasks, SAFETY_TASKS)
+        tasks = _split(args.tasks, task_pool)
         embs = [resolve_embodiment(e) for e in _split_embodiments(args.embodiments)]
         modes = ["none", "off_path", "on_path"]
         extra_plan = ["no_ignore_obstacle"]
         extra_place = ["waypoint"]
     else:
-        tasks = _split(args.tasks, SAFETY_TASKS)
+        tasks = _split(args.tasks, task_pool)
         embs = [resolve_embodiment(e) for e in _split_embodiments(args.embodiments)]
         modes = [m.strip() for m in args.obstacle_modes.split(",") if m.strip()]
         extra_plan = []
@@ -219,6 +226,8 @@ def _to_run_args(args: argparse.Namespace, job: dict):
         arm="auto",
         draw_bbox=args.draw_bbox,
         controller=args.controller,
+        msaa=getattr(args, "msaa", 2),
+        video_res=getattr(args, "video_res", "320x240"),
         record_every=args.record_every,
         fps=args.fps,
         output=args.output,
