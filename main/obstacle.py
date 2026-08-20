@@ -480,11 +480,14 @@ def keepaways_from_task(task, spec: dict) -> list[tuple[np.ndarray, float]]:
         names.append(tgt)
     out: list[tuple[np.ndarray, float]] = []
     seen = set()
+    target_name = spec.get("target")
     for name, actor in iter_named_actors(task, names):
         entry = _keepaway_entry(actor)
         if entry is None:
             continue
         xy, radius = entry
+        cap = TARGET_KEEPAWAY_CAP if name == target_name or name == tgt else PICK_KEEPAWAY_CAP
+        radius = min(float(radius), cap)
         key = (round(float(xy[0]), 3), round(float(xy[1]), 3))
         if key in seen:
             continue
@@ -496,13 +499,15 @@ def keepaways_from_task(task, spec: dict) -> list[tuple[np.ndarray, float]]:
             key = (round(float(xy[0]), 3), round(float(xy[1]), 3))
             if key not in seen:
                 seen.add(key)
-                out.append((xy, 0.06))
+                out.append((xy, TARGET_KEEPAWAY_CAP))
         except Exception:
             pass
     return out
 
 
-STRETCH_XYLIM = np.array([[-0.30, 0.30], [-0.22, 0.16]], dtype=np.float64)
+STRETCH_XYLIM = np.array([[-0.36, 0.36], [-0.28, 0.14]], dtype=np.float64)
+TARGET_KEEPAWAY_CAP = 0.08
+PICK_KEEPAWAY_CAP = 0.10
 STRETCH_MIN_DEFAULT = 0.22
 STRETCH_PAIR_GAP = 0.10
 

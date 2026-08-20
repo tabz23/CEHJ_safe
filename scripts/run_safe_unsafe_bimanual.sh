@@ -3,7 +3,7 @@
 # Same seed across none / off_path / on_path so the scene matches.
 #
 #   place_burger_fries, place_cans_plasticbox, stack_blocks_two, place_can_basket,
-#   place_bread_basket, place_bread_skillet, pick_dual_bottles, stack_bowls_two
+#   place_bread_basket, grab_roller, pick_dual_bottles, stack_bowls_two
 #
 #   8 tasks × 4 embodiments × 3 modes = 96 episodes
 #   embodiments (all): ARX-X5, franka-panda, ur5-wsg, piper

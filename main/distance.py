@@ -668,6 +668,26 @@ def detect_held_by_arm(env) -> dict[str, tuple | None]:
             _apply_side_metrics(debug, metrics)
 
     for side in ("left", "right"):
+        if result[side] is not None or not debug[f"{side}_holding"]:
+            continue
+        other = "right" if side == "left" else "left"
+        if result[other] is None:
+            continue
+        actor, label = result[other]
+        metrics = _hold_metrics(env, actor, side)
+        if not metrics["near"]:
+            continue
+        prefix = "L" if side == "left" else "R"
+        result[side] = (actor, label)
+        debug[f"{prefix}_source"] = "share"
+        debug[f"{prefix}_fail"] = ""
+        debug[f"{prefix}_near"] = True
+        debug[f"{prefix}_tcp_obb"] = metrics["tcp_obb"]
+        debug[f"{prefix}_grip_obb"] = metrics["grip_obb"]
+        debug[f"{prefix}_origin_dist_ee"] = metrics["origin_dist_ee"]
+        debug[f"{prefix}_origin_dist_tcp"] = metrics["origin_dist_tcp"]
+
+    for side in ("left", "right"):
         prefix = "L" if side == "left" else "R"
         actor = result[side][0] if result[side] else None
         if actor is None and items:

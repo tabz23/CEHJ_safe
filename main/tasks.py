@@ -123,16 +123,16 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "arm": "from_object_x",
         "grasp_objects": ("bread",),
         "corridors": (("bread", "breadbasket"),),
-        "stretch_min": 0.22,
+        "stretch_min": 0.32,
         "bias_opposite": True,
     },
-    "place_bread_skillet": {
-        "object": "skillet",
-        "target": "skillet_place",
-        "arm": "from_object_x",
-        "grasp_objects": ("skillet", "bread"),
-        "corridors": (("skillet", "skillet_place"), ("bread", "skillet")),
-        "stretch_min": 0.22,
+    "grab_roller": {
+        "object": "roller",
+        "target": "roller",
+        "arm": "left",
+        "grasp_objects": ("roller",),
+        "corridors": (("approach_left", "roller"), ("approach_right", "roller")),
+        "share_hold": True,
     },
     "pick_dual_bottles": {
         "object": "bottle1",
@@ -217,12 +217,30 @@ def resolve_arm(task, spec: dict, arm: str = "auto") -> str:
     return "right" if x > 0 else "left"
 
 
+VIRTUAL_XY = {
+    "approach_left": np.array([-0.26, 0.10], dtype=np.float64),
+    "approach_right": np.array([0.26, 0.10], dtype=np.float64),
+}
+
+
 def _special_target_xy(task, name: str) -> np.ndarray | None:
+    if name in VIRTUAL_XY:
+        return VIRTUAL_XY[name].copy()
     if name == "skillet_place":
         skillet = getattr(task, "skillet", None)
         x = 0.10 if skillet is not None and float(_xy(skillet)[0]) > 0 else -0.10
         return np.array([x, -0.05], dtype=np.float64)
     return None
+
+
+def source_xy(task, name: str) -> np.ndarray:
+    special = _special_target_xy(task, name)
+    if special is not None:
+        return special
+    actors = list(iter_named_actors(task, [name]))
+    if actors:
+        return _xy(actors[0][1])
+    return _xy(getattr(task, name))
 
 
 def target_xy(task, name: str) -> np.ndarray:
@@ -266,6 +284,9 @@ def iter_corridors(task, spec: dict) -> list[tuple[np.ndarray, np.ndarray, str, 
     out: list[tuple[np.ndarray, np.ndarray, str, str]] = []
     for src_name, tgt_name in pairs:
         p1 = target_xy(task, tgt_name)
+        if src_name in VIRTUAL_XY:
+            out.append((source_xy(task, src_name), p1, src_name, tgt_name))
+            continue
         srcs = list(iter_named_actors(task, [src_name]))
         if not srcs:
             try:
@@ -290,5 +311,10 @@ def longest_corridor(task, spec: dict, robot, arm: str) -> tuple[np.ndarray, np.
         return p0, p1, arm
     best = max(corridors, key=lambda c: float(np.linalg.norm(c[1] - c[0])))
     p0, p1, label, _tgt = best
-    arm_hint = "right" if float(p0[0]) > 0 else "left"
+    if label == "approach_right":
+        arm_hint = "right"
+    elif label == "approach_left":
+        arm_hint = "left"
+    else:
+        arm_hint = "right" if float(p0[0]) > 0 else "left"
     return p0, p1, arm_hint
