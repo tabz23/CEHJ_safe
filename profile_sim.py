@@ -35,7 +35,7 @@ from record import (  # noqa: E402
     observer_rgb,
     to_record_size,
 )
-from run import CONTROLLERS, _level, _make_env, _video_res  # noqa: E402
+from run import CONTROLLERS, _corridor_t, _make_env, _video_res  # noqa: E402
 from tasks import SAFETY_TASKS  # noqa: E402
 from distance import detect_held_object, distance_info  # noqa: E402
 
@@ -315,9 +315,9 @@ def make_env(args: argparse.Namespace, seed: int):
 def profile_episode(args: argparse.Namespace, seed: int) -> dict:
     env, ctrl = make_env(args, seed)
     embodiment = env.embodiment
-    level = _level(args.unsafe_level, seed)
+    t = _corridor_t(seed)
     actor, xyz, half, _arm = choose_and_spawn(
-        env, args.obstacle_mode, args.place_mode, level, "auto"
+        env, args.obstacle_mode, args.place_mode, t, "auto"
     )
     env.obstacle = actor
     env.obstacle_xyz = xyz

@@ -31,7 +31,7 @@ from argparse import Namespace
 
 from controller import ResidualController
 from env import CEHJ_ROOT, resolve_embodiment
-from run import CONTROLLERS, run_episode, _level
+from run import CONTROLLERS, run_episode, _corridor_t, _t_tag
 from tasks import BIMANUAL_TASKS, EMBODIMENTS, SAFETY_TASKS, SWEEP_EMBODIMENTS
 
 ALIASES = {
@@ -91,7 +91,11 @@ def parse_args() -> argparse.Namespace:
         default="ignore_obstacle",
         choices=("ignore_obstacle", "no_ignore_obstacle"),
     )
-    parser.add_argument("--unsafe-level", default="2")
+    parser.add_argument(
+        "--unsafe-level",
+        default="2",
+        help="Ignored. Obstacle t is Uniform[0.3, 0.7] from the seed.",
+    )
     parser.add_argument("--episodes", type=int, default=1, help="Different seeds / scenes per pair.")
     parser.add_argument("--base-seed", type=int, default=0)
     parser.add_argument("--cluttered", action="store_true")
@@ -181,10 +185,10 @@ def _jobs(args: argparse.Namespace) -> list[dict]:
 
 def _job_out_dir(args: argparse.Namespace, job: dict) -> Path:
     cluttered = bool(args.cluttered)
-    level = _level(args.unsafe_level, job["seed"])
+    t = _corridor_t(job["seed"])
     tag = (
         f"{job['obstacle_mode']}_{job['place_mode']}_{job['plan_mode']}_"
-        f"l{level}_seed{job['seed']}"
+        f"{_t_tag(t)}_seed{job['seed']}"
     )
     if cluttered:
         tag += "_clutter"

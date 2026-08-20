@@ -37,8 +37,8 @@ Params and options (also `python run.py --help`):
                       ignore_obstacle      : CuRobo world = table only (can hit the block)
                       no_ignore_obstacle   : add the block to CuRobo MotionGen and replan around it
 
-  --unsafe-level      1 | 2 | 3 | random   (default: 2)
-                      How on-the-line / large the on_path block is (or how far off_path is).
+  --unsafe-level      ignored (kept so old scripts still parse). Placement t is
+                      Uniform[0.3, 0.7] from the seed, same for none/off_path/on_path.
 
   --arm               auto | left | right   (default: auto)
                       auto uses the same rule as the task expert.
@@ -50,7 +50,7 @@ Params and options (also `python run.py --help`):
 Examples:
   python run.py --task place_empty_cup --embodiment piper --obstacle-mode none --seed 0
   python run.py --task place_empty_cup --embodiment piper --obstacle-mode on_path \\
-      --place-mode geometric --plan-mode ignore_obstacle --unsafe-level 3 --draw-bbox
+      --place-mode geometric --plan-mode ignore_obstacle --draw-bbox
   python run.py --task place_empty_cup --embodiment piper --obstacle-mode on_path \\
       --place-mode waypoint --plan-mode no_ignore_obstacle
 """
@@ -104,7 +104,11 @@ def parse_args() -> argparse.Namespace:
         choices=("ignore_obstacle", "no_ignore_obstacle"),
         default="ignore_obstacle",
     )
-    parser.add_argument("--unsafe-level", default="2", help="1, 2, 3, or random")
+    parser.add_argument(
+        "--unsafe-level",
+        default="2",
+        help="Ignored. Obstacle t is Uniform[0.3, 0.7] from the seed.",
+    )
     parser.add_argument("--arm", choices=("auto", "left", "right"), default="auto")
     parser.add_argument("--draw-bbox", action="store_true")
     parser.add_argument("--controller", choices=tuple(CONTROLLERS), default="residual")
@@ -126,14 +130,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _level(value: str, seed: int) -> int:
-    if str(value).lower() == "random":
-        rng = np.random.RandomState(seed + 917)
-        return int(rng.choice([1, 2, 3]))
-    lvl = int(value)
-    if lvl not in (1, 2, 3):
-        raise ValueError("--unsafe-level must be 1, 2, 3, or random")
-    return lvl
+def _corridor_t(seed: int) -> float:
+    """Same t for none / off_path / on_path of one seed. Uniform in [0.3, 0.7]."""
+    rng = np.random.RandomState(int(seed) + 917)
+    return float(rng.uniform(0.30, 0.70))
+
+
+def _t_tag(t: float) -> str:
+    return f"t{int(round(float(t) * 100.0)):02d}"
 
 
 def _video_res(value: str) -> tuple[int, int]:
@@ -192,7 +196,7 @@ def _record_ee_path(env, arm: str, record_every: int) -> np.ndarray:
 
 def run_episode(args: argparse.Namespace) -> dict:
     cluttered = bool(args.cluttered) and not bool(args.no_cluttered)
-    level = _level(args.unsafe_level, args.seed)
+    t = _corridor_t(args.seed)
     ee_path = None
     arm = args.arm
 
@@ -209,7 +213,7 @@ def run_episode(args: argparse.Namespace) -> dict:
     print(
         f"{args.task} / {env.embodiment} seed={args.seed} "
         f"obstacle={args.obstacle_mode} place={args.place_mode} "
-        f"plan={args.plan_mode} cluttered={cluttered} level={level} "
+        f"plan={args.plan_mode} cluttered={cluttered} t={t:.2f} "
         f"controller={type(ctrl).__name__} planner={type(env.robot.left_planner).__name__}"
     )
 
@@ -217,7 +221,7 @@ def run_episode(args: argparse.Namespace) -> dict:
         env,
         args.obstacle_mode,
         args.place_mode,
-        level,
+        t,
         arm,
         ee_path=ee_path,
     )
@@ -289,7 +293,7 @@ def run_episode(args: argparse.Namespace) -> dict:
 
     tag = (
         f"{args.obstacle_mode}_{args.place_mode}_{args.plan_mode}_"
-        f"l{level}_seed{args.seed}"
+        f"{_t_tag(t)}_seed{args.seed}"
     )
     if cluttered:
         tag += "_clutter"
@@ -311,7 +315,8 @@ def run_episode(args: argparse.Namespace) -> dict:
         "obstacle_mode": args.obstacle_mode,
         "place_mode": args.place_mode,
         "plan_mode": args.plan_mode,
-        "unsafe_level": level,
+        "obstacle_t": t,
+        "unsafe_level": getattr(args, "unsafe_level", None),
         "arm": arm,
         "success": success,
         "plan_success": plan_success,

@@ -369,14 +369,12 @@ def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_b
         hold_line += f")  contact={int(info['contact'])} {info['closest']}"
         d_line = (
             f"dL={_cm(info['d_left'])} dR={_cm(info['d_right'])} "
-            f"dLh={_cm(info['d_left_held'])} dRh={_cm(info['d_right_held'])} "
-            f"dmin={_cm(info['d_min'])}"
+            f"dLh={_cm(info['d_left_held'])} dRh={_cm(info['d_right_held'])}"
         )
         lines = [
             hold_line,
             d_line,
-            f"mode={overlay.get('obstacle_mode')} plan={overlay.get('plan_mode')} "
-            f"seed={overlay.get('seed')} expert={plan}",
+            f"dmin={_cm(info['d_min'])} seed={overlay.get('seed')} expert={plan}",
         ]
         streams["agent_rgb"].append(_put_text(rgb, lines))
         if draw_bbox:

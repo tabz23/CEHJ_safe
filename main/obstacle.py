@@ -57,7 +57,10 @@ def world_center_and_half(cfg: dict | None) -> tuple[np.ndarray, np.ndarray]:
         return center.astype(np.float64), extents.astype(np.float64)
     return (center * scale).astype(np.float64), (0.5 * extents * scale).astype(np.float64)
 
-# t along object→target. Do not scale the mesh: create_actor uses model_data scale=1.
+# t along object→target is sampled in [CORRIDOR_T_LO, CORRIDOR_T_HI] per seed.
+# Do not scale 086_woodenblock: create_actor uses model_data scale=1 (~10.3 cm cube).
+CORRIDOR_T_LO = 0.30
+CORRIDOR_T_HI = 0.70
 UNSAFE_LEVEL = {
     1: {"t": 0.45, "off_path_m": 0.16},
     2: {"t": 0.55, "off_path_m": 0.22},
@@ -183,23 +186,55 @@ def _keepaway_ok(xy: np.ndarray, keepaways: Iterable[tuple[np.ndarray, float]], 
     return True
 
 
-def _t_cap_before_targets(
+def _blocked_t_intervals(
+    p0: np.ndarray,
+    p1: np.ndarray,
+    dist: float,
+    keepaways: list[tuple[np.ndarray, float]],
+    block_r: float,
+) -> list[tuple[float, float]]:
+    """t ranges on the object→target segment that overlap a pick/target keepaway."""
+    delta = p1 - p0
+    out: list[tuple[float, float]] = []
+    if dist <= 1e-6:
+        return out
+    for pt, actor_r in keepaways:
+        p = np.asarray(pt[:2], dtype=np.float64)
+        need = block_r + float(actor_r) + KEEPAWAY_GAP
+        t_proj = float(np.dot(p - p0, delta) / (dist * dist))
+        closest = p0 + t_proj * delta
+        perp = float(np.linalg.norm(p - closest))
+        if perp >= need:
+            continue
+        half_t = float(np.sqrt(max(need * need - perp * perp, 0.0)) / dist)
+        out.append((t_proj - half_t, t_proj + half_t))
+    return out
+
+
+def _t_free(t: float, blocked: list[tuple[float, float]], margin: float = 1e-4) -> bool:
+    return all(t <= a - margin or t >= b + margin for a, b in blocked)
+
+
+def _t_bounds(
     p0: np.ndarray,
     p1: np.ndarray,
     dist: float,
     keepaways: list[tuple[np.ndarray, float]],
     block_r: float,
     t_pref: float,
-) -> float:
-    """Largest t that stays block_r + target_r + gap short of keepaways near p1."""
-    t_max = 0.92
-    for pt, actor_r in keepaways:
-        if np.linalg.norm(np.asarray(pt[:2], dtype=np.float64) - p1) > 0.04:
-            continue
-        need = block_r + float(actor_r) + KEEPAWAY_GAP
-        if dist > 1e-6:
-            t_max = min(t_max, 1.0 - need / dist)
-    return float(np.clip(min(t_pref, t_max), 0.18, 0.92))
+    t_lo: float = CORRIDOR_T_LO,
+    t_hi: float = CORRIDOR_T_HI,
+) -> tuple[float, float, float]:
+    """Prefer t_pref in [0.3, 0.7]; snap to the nearest keepaway-free t in that range."""
+    lo, hi = float(t_lo), float(t_hi)
+    blocked = _blocked_t_intervals(p0, p1, dist, keepaways, block_r)
+    pref = float(np.clip(t_pref, lo, hi))
+    if _t_free(pref, blocked):
+        return pref, lo, hi
+    free = [float(t) for t in np.linspace(lo, hi, 41) if _t_free(t, blocked)]
+    if free:
+        pref = min(free, key=lambda t: abs(t - pref))
+    return pref, lo, hi
 
 
 def _pack_xyz(xy: np.ndarray, table_z: float, half: np.ndarray) -> np.ndarray:
@@ -223,18 +258,16 @@ def geometric_pose(
     p0: np.ndarray,
     p1: np.ndarray,
     mode: str,
-    level: int,
+    corridor_t: float,
     table_z: float,
     keepaways: list[tuple[np.ndarray, float]],
     robot_keepaways: list[tuple[np.ndarray, float]] | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Return (xyz, half_extents), or (None, None) if every candidate overlaps a keepaway.
 
-    off_path may sit anywhere on the free table (not glued to the object→target
-    segment). on_path stays on that segment when possible, then accepts a nearby
-    free cell rather than skipping.
+    on_path stays on the object→target segment at corridor_t when keepaway allows.
+    off_path is beside that segment. Block size is the stock 086_woodenblock cube.
     """
-    cfg = UNSAFE_LEVEL[int(level)]
     p0 = np.asarray(p0[:2], dtype=np.float64)
     p1 = np.asarray(p1[:2], dtype=np.float64)
     robot_keepaways = list(robot_keepaways or ())
@@ -246,13 +279,14 @@ def geometric_pose(
     perp = np.array([-delta[1], delta[0]], dtype=np.float64) / dist
     half = _model_half_extents()
     block_r = float(np.max(half[:2]))
-    t0 = _t_cap_before_targets(p0, p1, dist, keepaways, block_r, cfg["t"])
-    t_tries: list[float] = []
-    for t in (t0, 0.55, 0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.18, 0.65, 0.75):
-        if t not in t_tries:
-            t_tries.append(float(t))
+    t0, t_lo, t_hi = _t_bounds(p0, p1, dist, keepaways, block_r, float(corridor_t))
+    t_tries: list[float] = [t0]
+    for t in np.linspace(t_lo, t_hi, 9):
+        t = float(t)
+        if all(abs(t - x) > 1e-4 for x in t_tries):
+            t_tries.append(t)
     signs = _perp_signs(p0, delta, perp, robot_keepaways)
-    off_pref = cfg["off_path_m"]
+    off_pref = 0.22
     offsets: list[float] = []
     for off in (off_pref, 0.20, 0.16, 0.24, 0.32, 0.40, 0.12, 0.48):
         if off not in offsets:
@@ -333,7 +367,7 @@ def geometric_pose(
 def waypoint_pose(
     ee_path: np.ndarray,
     mode: str,
-    level: int,
+    corridor_t: float,
     table_z: float,
     keepaways: list[tuple[np.ndarray, float]],
     p0: np.ndarray,
@@ -341,28 +375,27 @@ def waypoint_pose(
     robot_keepaways: list[tuple[np.ndarray, float]] | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Snap onto a recorded EE polyline, else fall back to geometric. Same keepaway as geometric."""
-    cfg = UNSAFE_LEVEL[int(level)]
     pts = np.asarray(ee_path, dtype=np.float64).reshape(-1, 3)
     high = pts[pts[:, 2] > table_z + 0.04] if pts.size else pts
     if high.shape[0] < 3:
-        return geometric_pose(p0, p1, mode, level, table_z, keepaways, robot_keepaways)
-    t = cfg["t"]
+        return geometric_pose(p0, p1, mode, corridor_t, table_z, keepaways, robot_keepaways)
+    t = float(np.clip(corridor_t, CORRIDOR_T_LO, CORRIDOR_T_HI))
     i = int(np.clip(t * (high.shape[0] - 1), 1, high.shape[0] - 2))
     xy = high[i, :2].copy()
     if mode == "off_path":
         tangent = high[min(i + 1, high.shape[0] - 1), :2] - high[max(i - 1, 0), :2]
         nrm = np.linalg.norm(tangent)
         if nrm < 1e-6:
-            return geometric_pose(p0, p1, mode, level, table_z, keepaways, robot_keepaways)
+            return geometric_pose(p0, p1, mode, corridor_t, table_z, keepaways, robot_keepaways)
         perp = np.array([-tangent[1], tangent[0]], dtype=np.float64) / nrm
         signs = _perp_signs(np.asarray(p0[:2], dtype=np.float64), tangent, perp, robot_keepaways or [])
-        xy = xy + signs[0] * cfg["off_path_m"] * perp
+        xy = xy + signs[0] * 0.22 * perp
     half = _model_half_extents()
     block_r = float(np.max(half[:2]))
     if _in_table(xy, block_r) and _keepaway_ok(xy, keepaways, block_r):
         return _pack_xyz(xy, table_z, half), half
     print("[obstacle] waypoint snap overlaps a keepaway; using geometric")
-    return geometric_pose(p0, p1, mode, level, table_z, keepaways, robot_keepaways)
+    return geometric_pose(p0, p1, mode, corridor_t, table_z, keepaways, robot_keepaways)
 
 
 def spawn_woodenblock(task, xyz: np.ndarray, is_static: bool = True):
@@ -605,11 +638,19 @@ def stretch_task_spawns(env) -> None:
         )
 
 
+def _t_along(p0: np.ndarray, p1: np.ndarray, xy: np.ndarray) -> float | None:
+    delta = np.asarray(p1[:2], dtype=np.float64) - np.asarray(p0[:2], dtype=np.float64)
+    dist2 = float(np.dot(delta, delta))
+    if dist2 < 1e-12:
+        return None
+    return float(np.dot(np.asarray(xy[:2], dtype=np.float64) - np.asarray(p0[:2], dtype=np.float64), delta) / dist2)
+
+
 def choose_and_spawn(
     env,
     obstacle_mode: str,
     place_mode: str,
-    unsafe_level: int,
+    corridor_t: float,
     arm: str,
     ee_path: np.ndarray | None = None,
 ):
@@ -625,26 +666,29 @@ def choose_and_spawn(
     task_keep = keepaways_from_task(env.task, spec)
     robot_keep = keepaways_from_robot(env)
     keep = task_keep + robot_keep
+    t_pref = float(np.clip(corridor_t, CORRIDOR_T_LO, CORRIDOR_T_HI))
     if keep:
         desc = ", ".join(f"{xy.round(3).tolist()} r={r:.3f}" for xy, r in keep)
         print(f"[obstacle] keepaway {desc}")
     if place_mode == "waypoint" and ee_path is not None and len(ee_path) >= 3:
         xyz, half = waypoint_pose(
-            ee_path, obstacle_mode, unsafe_level, table_z, keep, p0, p1, robot_keep
+            ee_path, obstacle_mode, t_pref, table_z, keep, p0, p1, robot_keep
         )
     else:
         if place_mode == "waypoint":
             print("[obstacle] waypoint path too short; using geometric")
         xyz, half = geometric_pose(
-            p0, p1, obstacle_mode, unsafe_level, table_z, keep, robot_keep
+            p0, p1, obstacle_mode, t_pref, table_z, keep, robot_keep
         )
     if xyz is None:
-        print(f"[obstacle] skipped spawn  {obstacle_mode} arm={arm} level={unsafe_level}")
+        print(f"[obstacle] skipped spawn  {obstacle_mode} arm={arm} t={t_pref:.2f}")
         return None, None, None, arm
+    t_used = _t_along(p0, p1, xyz)
+    t_txt = "na" if t_used is None else f"{t_used:.2f}"
     print(
         f"[obstacle] place-mode={place_mode} {obstacle_mode} "
         f"p0={p0.round(3).tolist()} p1={p1.round(3).tolist()} "
-        f"xyz={xyz.round(3).tolist()} arm={arm} level={unsafe_level}"
+        f"xyz={xyz.round(3).tolist()} arm={arm} t_pref={t_pref:.2f} t={t_txt}"
     )
     actor = spawn_woodenblock(env.task, xyz, is_static=True)
     return actor, xyz, half, arm

@@ -6,6 +6,7 @@
 #   place_bread_basket, grab_roller, pick_dual_bottles, stack_bowls_two
 #
 #   8 tasks × 4 embodiments × 3 modes = 96 episodes
+#   Obstacle t ~ Uniform[0.3, 0.7] from the seed (same t for none/off_path/on_path).
 #   embodiments (all): ARX-X5, franka-panda, ur5-wsg, piper
 #
 # Run inside the robot-sim container with rbtw128:
@@ -22,18 +23,34 @@ set -euo pipefail
 ROOT="/storage1/fs1/sibai/Active/yuxuan/cross_embodiment/CEHJ"
 export PYTHONNOUSERSITE=1
 
+
 python "${ROOT}/main/run_all.py" \
   --preset grid \
   --task-set bimanual \
   --tasks all \
   --embodiments all \
-  --obstacle-modes none,off_path,on_path \
+  --obstacle-modes on_path \
   --place-mode geometric \
   --plan-mode ignore_obstacle \
-  --unsafe-level 3 \
-  --episodes 1 \
-  --base-seed 0 \
+  --episodes 3 \
+  --base-seed 12 \
   --output "${ROOT}/outputs/ihab/safe_unsafe_bimanual" \
   --draw-bbox \
   --resume \
   "$@"
+
+
+# python "${ROOT}/main/run_all.py" \
+#   --preset grid \
+#   --task-set bimanual \
+#   --tasks all \
+#   --embodiments all \
+#   --obstacle-modes none,off_path,on_path \
+#   --place-mode geometric \
+#   --plan-mode ignore_obstacle \
+#   --episodes 1 \
+#   --base-seed 0 \
+#   --output "${ROOT}/outputs/ihab/safe_unsafe_bimanual" \
+#   --draw-bbox \
+#   --resume \
+#   "$@"

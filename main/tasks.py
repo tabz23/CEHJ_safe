@@ -78,7 +78,7 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "arm": "from_object_x_inv",
         "grasp_objects": ("block1", "block2"),
         "corridors": (("block1", "block1_target_pose"), ("block2", "block1_target_pose")),
-        "stretch_min": 0.22,
+        "stretch_min": 0.32,
         "bias_opposite": True,
     },
     "place_object_stand": {
