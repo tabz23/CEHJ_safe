@@ -95,7 +95,7 @@ def run_eval_episode(cfg, seed, mode, encoder, kin, policy_enc, actor, critics,
                 action, intervened = a_nom, False
 
         env.step_dtheta(action[0].cpu().numpy(), grip_left=goal[6], grip_right=goal[13])
-        h, _ = compute_h(env, cfg.table_margin)
+        h, _ = compute_h(env, cfg.table_margin, cfg.table_height)
 
         v_float = float(V.item()) if hasattr(V, "item") else float(V)
         trace["t"].append(t * cfg.control_dt)

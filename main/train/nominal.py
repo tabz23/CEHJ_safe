@@ -64,7 +64,8 @@ class NominalTracker:
             success = bool(env.task.check_success())
         except Exception as exc:
             print(f"[nominal] probe play_once failed: {exc}")
-        env.task.scene.step = orig_step
+        finally:
+            env.task.scene.step = orig_step  # restore even on failure
         return cls(np.asarray(traj, dtype=np.float32), success)
 
     def save(self, path: str | Path) -> Path:

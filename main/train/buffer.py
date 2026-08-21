@@ -3,13 +3,15 @@
 Per-step fields (~630 KB/step, dominated by fp16 scene tokens). Stored per
 step: scene_tokens, scene_pos, state_tokens, body_tokens, link_pos, qpos
 (policy layout, 14), qpos_raw (per-arm raw 8+8, for exact Jacobian
-recompute), dtheta, h, body_mask, joint_index, episode_id, done — with
-episode_id and done written from step zero, so sampling s' across an
-episode boundary is rejected at sample time.
+recompute), dtheta, h, per_link_h, d_arm_arm, body_mask, joint_index,
+episode_id, done — with episode_id and done written from step zero, so
+sampling s' across an episode boundary is rejected at sample time.
 
 Header (JSON, once): l_reach, joint_vel_limits, link_names, kappa,
 control_dt, T, embodiment, urdf_hash, field shapes — without these the
-stored values are uninterpretable later.
+stored values are uninterpretable later. Reopening reads capacity from the
+header; a fresh buffer requires an explicit capacity (an invented capacity
+would try to allocate petabytes).
 
 Not stored: Jlin/Jang (recomputed from qpos_raw via
 BodyTokenExtractor.jacobian_batch — sub-ms batched, and a URDF fix does
@@ -42,19 +44,36 @@ FIELDS = {
     "done": (np.bool_, ()),
 }
 
+# Fields read at sample time. `_next` needs only the observation side;
+# splitting avoids reading every field twice (the throughput ceiling).
+NEXT_FIELDS = (
+    "state_tokens", "body_tokens", "link_pos", "body_mask",
+    "joint_index", "scene_tokens", "scene_pos", "qpos_raw",
+)
+CUR_FIELDS = NEXT_FIELDS + ("h", "dtheta")
+
 
 class StepBuffer:
-    def __init__(self, root: str | Path, capacity: int, header: dict | None = None):
+    def __init__(self, root: str | Path, capacity: int | None = None,
+                 header: dict | None = None):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.capacity = int(capacity)
         header_path = self.root / "header.json"
         if header is not None:
+            if capacity is None:
+                raise ValueError("capacity is required when writing a header")
             header = dict(header)
             header["shapes"] = {k: list(v[1]) for k, v in FIELDS.items()}
-            header["capacity"] = self.capacity
+            header["capacity"] = int(capacity)
             header_path.write_text(json.dumps(header, indent=2))
         self.header = json.loads(header_path.read_text()) if header_path.exists() else {}
+        if capacity is None:
+            capacity = self.header.get("capacity")
+            if capacity is None:
+                raise ValueError(
+                    f"{self.root}: no capacity given and no header.json found"
+                )
+        self.capacity = int(capacity)
         self.arrays = {}
         for name, (dtype, shape) in FIELDS.items():
             p = self.root / f"{name}.npy"
@@ -66,6 +85,7 @@ class StepBuffer:
                 )
             self.arrays[name] = arr
         self.n = int(self.header.get("n", 0))
+        self._valid_t: np.ndarray | None = None
 
     def append(self, step: dict) -> None:
         assert self.n < self.capacity, "buffer full"
@@ -73,6 +93,7 @@ class StepBuffer:
             arr[self.n] = step[name]
         self.n += 1
         self.header["n"] = self.n
+        self._valid_t = None  # invalidate the sample cache
 
     def flush(self) -> None:
         for arr in self.arrays.values():
@@ -82,17 +103,28 @@ class StepBuffer:
     def __len__(self) -> int:
         return self.n
 
+    def _valid_transitions(self) -> np.ndarray:
+        """Cached list of t where (t, t+1) stays inside one episode."""
+        if self._valid_t is None:
+            ep = self.arrays["episode_id"][: self.n]
+            done = self.arrays["done"][: self.n]
+            self._valid_t = np.nonzero((ep[:-1] == ep[1:]) & ~done[:-1])[0]
+        return self._valid_t
+
     def sample(self, batch: int, rng: np.random.RandomState | None = None) -> dict:
-        """Sample (t, t+1) pairs; reject pairs crossing an episode boundary."""
+        """Sample (t, t+1) pairs; pairs never cross an episode boundary.
+
+        Reads CUR_FIELDS at t and NEXT_FIELDS at t+1 (not every field
+        twice).
+        """
         rng = rng or np.random.RandomState()
-        ep = self.arrays["episode_id"][: self.n]
-        done = self.arrays["done"][: self.n]
-        valid_t = np.nonzero((ep[:-1] == ep[1:]) & ~done[:-1])[0]
+        valid_t = self._valid_transitions()
         if len(valid_t) == 0:
             raise RuntimeError("no valid transitions yet")
         idx = rng.choice(valid_t, size=min(batch, len(valid_t)), replace=len(valid_t) < batch)
         out = {}
-        for name, arr in self.arrays.items():
-            out[name] = np.asarray(arr[idx])
-            out[name + "_next"] = np.asarray(arr[idx + 1])
+        for name in CUR_FIELDS:
+            out[name] = np.asarray(self.arrays[name][idx])
+        for name in NEXT_FIELDS:
+            out[name + "_next"] = np.asarray(self.arrays[name][idx + 1])
         return out

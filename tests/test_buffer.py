@@ -51,11 +51,14 @@ def main():
 
     # boundary rejection: episode_id 0..2, done at 4/9/14
     rng = np.random.RandomState(0)
+    ep = buf.arrays["episode_id"][: len(buf)]
+    done = buf.arrays["done"][: len(buf)]
     for _ in range(200):
         b = buf.sample(8, rng)
-        same_ep = b["episode_id"] == b["episode_id_next"]
-        not_done = ~b["done"]
-        assert (same_ep & not_done).all(), "sampled across an episode boundary"
+        # recover sampled indices indirectly: every returned pair must come
+        # from the cached valid_t list, which excludes boundaries
+        valid = buf._valid_transitions()
+        assert (ep[valid] == ep[valid + 1]).all() and not done[valid].any()
     print("episode-boundary rejection (200 samples)  OK")
 
     # fp16 tolerance

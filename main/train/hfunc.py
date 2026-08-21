@@ -33,7 +33,7 @@ from main.envs.distance import (
     _obb_from_actor,
 )
 
-TABLE_HEIGHT = 0.74  # RoboTwin _base_task.create_table_and_wall default
+TABLE_HEIGHT = 0.74  # default; the authoritative value lives in FrozenConfig.table_height
 
 
 def _arm_spheres(env):
@@ -53,7 +53,7 @@ def _arm_spheres(env):
                 yield f"{side}/{link_name}", np.asarray(center), float(radius)
 
 
-def compute_h(env, table_margin: float = 0.01) -> tuple[float, dict]:
+def compute_h(env, table_margin: float = 0.01, table_height: float = TABLE_HEIGHT) -> tuple[float, dict]:
     """Current h and privileged diagnostics."""
     # --- robot arms ∪ payload vs the spawned obstacle (per-phase rules live
     # inside distance_info: cup never an obstacle, held payload joins body) ---
@@ -64,7 +64,7 @@ def compute_h(env, table_margin: float = 0.01) -> tuple[float, dict]:
         d_block = float("inf")
 
     # --- per-link breakdown: block + table ---
-    table_z = TABLE_HEIGHT + float(env.task.table_z_bias)
+    table_z = table_height + float(env.task.table_z_bias)
     per_link: dict[str, float] = {}
     left_spheres, right_spheres = [], []
     for label, center, radius in _arm_spheres(env):

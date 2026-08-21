@@ -25,6 +25,7 @@ class FrozenConfig:
     gamma_final: float = 0.999
     gamma_anneal_steps: int = 50_000
     table_margin: float = 0.01          # table gets its own clearance margin (m)
+    table_height: float = 0.74          # RoboTwin default table height (m); part of h's definition
     obstacle_mode: str = "on_path"      # safety obstacle spawn mode for collection
     h_include_payload: bool = True      # grasped object joins the body set after grasp
     encoder_variant: str = "HoloBrain_v0.0_GD"

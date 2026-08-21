@@ -113,7 +113,7 @@ def collect(cfg: FrozenConfig, out_root: Path) -> Path:
                 )
                 state = encoder.encode_joint_angles(obs["joint_state"], kin).squeeze(2)[0]
             body = extractor.extract()
-            h, diag = compute_h(env, cfg.table_margin)
+            h, diag = compute_h(env, cfg.table_margin, cfg.table_height)
 
             goal = tracker.goal(t)                    # [14] absolute targets
             theta = obs["joint_state"][0, 0].numpy()  # [14] measured
