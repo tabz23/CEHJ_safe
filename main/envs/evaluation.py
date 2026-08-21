@@ -14,12 +14,15 @@ from pathlib import Path
 
 import numpy as np
 
-MAIN_DIR = Path(__file__).resolve().parent
-if str(MAIN_DIR) not in sys.path:
-    sys.path.insert(0, str(MAIN_DIR))
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path
 
-from controller import CuroboIKController, ResidualController
-from env import CEHJ_ROOT, Env, RECORD_SIZE
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    __package__ = "main.envs"
+
+from .controller import CuroboIKController, ResidualController
+from .env import CEHJ_ROOT, Env, RECORD_SIZE
 
 CONTROLLERS = {
     "residual": ResidualController,
@@ -128,7 +131,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Path]:
         f"planner={type(ctrl.robot.left_planner).__name__}"
     )
 
-    streams = {"agent_rgb": [], "left_wrist_rgb": [], "right_wrist_rgb": []}
+    streams = {"agent_rgb": [], "left_wrist_rgb": [], "right_wrist_rgb": [], "head_rgb": []}
     attach_recorder(env.task, streams, args.record_every)
     try:
         env.task.play_once()

@@ -9,7 +9,7 @@ from typing import Iterable
 import numpy as np
 import yaml
 
-from tasks import (
+from .tasks import (
     TASK_SPECS,
     iter_corridors,
     iter_named_actors,

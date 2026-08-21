@@ -23,21 +23,21 @@ import time
 from argparse import Namespace
 from pathlib import Path
 
-MAIN_DIR = Path(__file__).resolve().parent / "main"
-if str(MAIN_DIR) not in sys.path:
-    sys.path.insert(0, str(MAIN_DIR))
+CEHJ_ROOT = Path(__file__).resolve().parent
+if str(CEHJ_ROOT) not in sys.path:
+    sys.path.insert(0, str(CEHJ_ROOT))
 
-from env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE  # noqa: E402
-from obstacle import choose_and_spawn, update_curobo_world  # noqa: E402
-from record import (  # noqa: E402
+from main.envs.env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE  # noqa: E402
+from main.envs.obstacle import choose_and_spawn, update_curobo_world  # noqa: E402
+from main.envs.record import (  # noqa: E402
     _put_text,
     draw_debug_bboxes,
     observer_rgb,
     to_record_size,
 )
-from run import CONTROLLERS, _corridor_t, _make_env, _video_res  # noqa: E402
-from tasks import SAFETY_TASKS  # noqa: E402
-from distance import detect_held_object, distance_info  # noqa: E402
+from main.envs.run import CONTROLLERS, _corridor_t, _make_env, _video_res  # noqa: E402
+from main.envs.tasks import SAFETY_TASKS  # noqa: E402
+from main.envs.distance import detect_held_object, distance_info  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -292,7 +292,7 @@ def make_env(args: argparse.Namespace, seed: int):
     if ssaa == 2:
         env, ctrl = _make_env(run_ns, seed)
     else:
-        from env import Env
+        from main.envs.env import Env
 
         ctrl_cls = CONTROLLERS[args.controller]
         ctrl_cls.install()

@@ -22,3 +22,5 @@ venv/
 .DS_Store
 .vscode/
 *.swp
+runs/
+nominal_cache/
