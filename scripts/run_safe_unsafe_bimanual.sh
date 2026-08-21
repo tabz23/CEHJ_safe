@@ -34,7 +34,7 @@ python "${ROOT}/main/run_all.py" \
   --plan-mode ignore_obstacle \
   --episodes 3 \
   --base-seed 12 \
-  --output "${ROOT}/outputs/ihab/safe_unsafe_bimanual" \
+  --output "${ROOT}/outputs/ihab/safe_unsafe_bimanual good" \
   --draw-bbox \
   --resume \
   "$@"

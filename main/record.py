@@ -161,6 +161,10 @@ def draw_debug_bboxes(env, frame: np.ndarray) -> np.ndarray:
 HOLD_CSV_FIELDS = [
     "step",
     "recorded",
+    "skill",
+    "n_plan",
+    "ee_err_L",
+    "ee_err_R",
     "holding",
     "holding_left",
     "holding_right",
@@ -215,10 +219,34 @@ HOLD_CSV_FIELDS = [
 ]
 
 
-def _hold_csv_row(step: int, recorded: int, dbg: dict, info: dict | None = None) -> dict:
+def _xyz_err(env, arm: str):
+    targets = getattr(env.task, "_cehj_ee_target", None) or {}
+    tgt = targets.get(arm)
+    if tgt is None or len(tgt) < 3:
+        return ""
+    try:
+        robot = env.robot
+        cur = robot.get_left_ee_pose() if arm == "left" else robot.get_right_ee_pose()
+        cur = np.asarray(cur, dtype=np.float64).reshape(-1)
+        return float(np.linalg.norm(cur[:3] - np.asarray(tgt[:3], dtype=np.float64)))
+    except Exception:
+        return ""
+
+
+def _hold_csv_row(
+    step: int,
+    recorded: int,
+    dbg: dict,
+    info: dict | None = None,
+    extra: dict | None = None,
+) -> dict:
     row = {key: "" for key in HOLD_CSV_FIELDS}
     row["step"] = step
     row["recorded"] = recorded
+    if extra:
+        for key, val in extra.items():
+            if key in HOLD_CSV_FIELDS:
+                row[key] = "" if val is None else val
     row["holding"] = dbg.get("holding") or (info or {}).get("holding") or ""
     row["holding_left"] = dbg.get("holding_left") or (info or {}).get("holding_left") or ""
     row["holding_right"] = dbg.get("holding_right") or (info or {}).get("holding_right") or ""
@@ -296,7 +324,14 @@ def write_hold_trace(rows: list[dict], out_path: Path) -> Path:
     return out_path
 
 
-def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_bbox: bool):
+def attach_recorder(
+    env,
+    streams: dict,
+    record_every: int,
+    overlay: dict,
+    draw_bbox: bool,
+    clock=None,
+):
     state = {
         "n": 0,
         "d_min": [],
@@ -324,13 +359,23 @@ def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_b
         state["n"] += 1
         recorded = state["n"] % max(record_every, 1) == 0
         try:
-            info = distance_info(env)
+            if clock is not None:
+                with clock.span("metric"):
+                    info = distance_info(env)
+            else:
+                info = distance_info(env)
         except Exception as exc:
             if recorded or state["n"] <= 2 or state["n"] % 50 == 0:
                 print(f"\n[record] distance_info failed at step {state['n']}: {exc}")
             return
         dbg = dict(info.get("hold_debug") or getattr(env, "_cehj_hold_debug", {}) or {})
-        state["csv_rows"].append(_hold_csv_row(state["n"], int(recorded), dbg, info))
+        extra = {
+            "skill": getattr(env.task, "_cehj_skill", "") or "",
+            "n_plan": "" if clock is None else clock.n_plan,
+            "ee_err_L": _xyz_err(env, "left"),
+            "ee_err_R": _xyz_err(env, "right"),
+        }
+        state["csv_rows"].append(_hold_csv_row(state["n"], int(recorded), dbg, info, extra))
         state["d_min"].append(info["d_min"])
         state["d_robot"].append(info["d_robot"])
         state["d_system"].append(info["d_system"])
@@ -345,50 +390,83 @@ def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_b
         state["contact"].append(info["contact"])
         if not recorded:
             return
-        obs = env.task.get_obs()["observation"]
-        rgb = observer_rgb(env.task)
-        rec_wh = getattr(env, "record_size", RECORD_SIZE)
-        debug = draw_debug_bboxes(env, rgb) if draw_bbox else None
-        rgb = to_record_size(rgb, rec_wh)
+        def _record_cameras():
+            obs = env.task.get_obs()["observation"]
+            rgb = observer_rgb(env.task)
+            rec_wh = getattr(env, "record_size", RECORD_SIZE)
+            debug = draw_debug_bboxes(env, rgb) if draw_bbox else None
+            rgb = to_record_size(rgb, rec_wh)
 
-        plan = overlay.get("plan_success")
-        if plan is None:
-            plan = getattr(env.task, "plan_success", None)
-        hold_l = info.get("holding_left") or "none"
-        hold_r = info.get("holding_right") or "none"
-        src_l = dbg.get("L_source") or "none"
-        src_r = dbg.get("R_source") or "none"
-        fail_l = dbg.get("L_fail") or ""
-        fail_r = dbg.get("R_fail") or ""
-        hold_line = f"HOLD L={hold_l}({src_l}"
-        if fail_l:
-            hold_line += f"/{fail_l}"
-        hold_line += f")  R={hold_r}({src_r}"
-        if fail_r:
-            hold_line += f"/{fail_r}"
-        hold_line += f")  contact={int(info['contact'])} {info['closest']}"
-        d_line = (
-            f"dL={_cm(info['d_left'])} dR={_cm(info['d_right'])} "
-            f"dLh={_cm(info['d_left_held'])} dRh={_cm(info['d_right_held'])}"
-        )
-        lines = [
-            hold_line,
-            d_line,
-            f"dmin={_cm(info['d_min'])} seed={overlay.get('seed')} expert={plan}",
-        ]
-        streams["agent_rgb"].append(_put_text(rgb, lines))
-        if draw_bbox:
-            streams["debug_bbox"].append(_put_text(to_record_size(debug, rec_wh), lines))
-        streams["left_wrist_rgb"].append(np.asarray(obs["left_camera"]["rgb"], dtype=np.uint8))
-        streams["right_wrist_rgb"].append(np.asarray(obs["right_camera"]["rgb"], dtype=np.uint8))
-        print(
-            f"recorded {len(streams['agent_rgb'])} frames  "
-            f"HOLD L={hold_l} R={hold_r} dmin={_cm(info['d_min'])}",
-            end="\r",
-        )
+            plan = overlay.get("plan_success")
+            if plan is None:
+                plan = getattr(env.task, "plan_success", None)
+            hold_l = info.get("holding_left") or "none"
+            hold_r = info.get("holding_right") or "none"
+            src_l = dbg.get("L_source") or "none"
+            src_r = dbg.get("R_source") or "none"
+            fail_l = dbg.get("L_fail") or ""
+            fail_r = dbg.get("R_fail") or ""
+            hold_line = f"HOLD L={hold_l}({src_l}"
+            if fail_l:
+                hold_line += f"/{fail_l}"
+            hold_line += f")  R={hold_r}({src_r}"
+            if fail_r:
+                hold_line += f"/{fail_r}"
+            hold_line += f")  contact={int(info['contact'])} {info['closest']}"
+            d_line = (
+                f"dL={_cm(info['d_left'])} dR={_cm(info['d_right'])} "
+                f"dLh={_cm(info['d_left_held'])} dRh={_cm(info['d_right_held'])}"
+            )
+            clk = overlay.get("clock")
+            ctrl = overlay.get("controller") or ""
+            k = overlay.get("replan_k")
+            n_plan = getattr(clk, "n_plan", None)
+            ctrl_line = f"ctrl={ctrl}"
+            if k is not None:
+                ctrl_line += f" k={k}"
+            if n_plan is not None:
+                ctrl_line += f" n_plan={n_plan}"
+            if clk is not None:
+                ctrl_line += f" t={clk.t_episode:.1f}s"
+            skill = getattr(env.task, "_cehj_skill", None) or "skill=?"
+            lines = [
+                str(skill),
+                hold_line,
+                d_line,
+                f"dmin={_cm(info['d_min'])} seed={overlay.get('seed')} expert={plan}",
+                ctrl_line,
+            ]
+            streams["agent_rgb"].append(_put_text(rgb, lines))
+            if draw_bbox:
+                streams["debug_bbox"].append(_put_text(to_record_size(debug, rec_wh), lines))
+            streams["left_wrist_rgb"].append(np.asarray(obs["left_camera"]["rgb"], dtype=np.uint8))
+            streams["right_wrist_rgb"].append(np.asarray(obs["right_camera"]["rgb"], dtype=np.uint8))
+            print(
+                f"recorded {len(streams['agent_rgb'])} frames  "
+                f"HOLD L={hold_l} R={hold_r} dmin={_cm(info['d_min'])}",
+                end="\r",
+            )
+
+        if clock is not None:
+            with clock.span("render"):
+                _record_cameras()
+        else:
+            _record_cameras()
 
     env.task.scene.step = step
     return state
+
+
+def grab_window_frame(env, lines: list[str], draw_bbox: bool = False) -> np.ndarray:
+    """One observer frame for an MPC window clip (every physics step)."""
+    task = env.task
+    if hasattr(task, "_update_render"):
+        task._update_render()
+    rgb = observer_rgb(task)
+    if draw_bbox:
+        rgb = draw_debug_bboxes(env, rgb)
+    rec_wh = getattr(env, "record_size", RECORD_SIZE)
+    return _put_text(to_record_size(rgb, rec_wh), lines)
 
 
 def detach_recorder(env, state: dict) -> None:

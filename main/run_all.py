@@ -23,13 +23,12 @@ import json
 import sys
 from pathlib import Path
 
-MAIN_DIR = Path(__file__).resolve().parent
-if str(MAIN_DIR) not in sys.path:
-    sys.path.insert(0, str(MAIN_DIR))
+MAIN_DIR = Path(__file__).parent
+sys.path.insert(0, str(MAIN_DIR))
 
 from argparse import Namespace
 
-from controller import ResidualController
+from controller import ResidualController, controller_class
 from env import CEHJ_ROOT, resolve_embodiment
 from run import CONTROLLERS, run_episode, _corridor_t, _t_tag
 from tasks import BIMANUAL_TASKS, EMBODIMENTS, SAFETY_TASKS, SWEEP_EMBODIMENTS
@@ -105,6 +104,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=10.0)
     parser.add_argument("--arm-distance", type=float, default=0.6)
     parser.add_argument("--controller", default="residual")
+    parser.add_argument(
+        "--controllers",
+        default="",
+        help="Comma list. If set, each scene runs these in order (policy inner). "
+        "plan_play_once_everyk is expanded with --replan-ks.",
+    )
+    parser.add_argument("--replan-k", type=int, default=20)
+    parser.add_argument(
+        "--replan-ks",
+        default="",
+        help="Comma list of K for plan_play_once_everyk when using --controllers "
+        "(e.g. 20,5,1). Default: --replan-k.",
+    )
+    parser.add_argument("--replan-max", type=int, default=2500)
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -183,6 +196,48 @@ def _jobs(args: argparse.Namespace) -> list[dict]:
     return jobs
 
 
+def _policies(args: argparse.Namespace) -> list[dict]:
+    raw = str(getattr(args, "controllers", "") or "").strip()
+    names = [p.strip() for p in raw.split(",") if p.strip()] if raw else [str(args.controller)]
+    ks_raw = str(getattr(args, "replan_ks", "") or "").strip()
+    if ks_raw:
+        ks = [int(x.strip()) for x in ks_raw.split(",") if x.strip()]
+    else:
+        ks = [int(getattr(args, "replan_k", 20))]
+    out = []
+    for name in names:
+        if name == "plan_play_once_everyk":
+            for k in ks:
+                out.append(
+                    {
+                        "controller": name,
+                        "replan_k": int(k),
+                        "policy_dir": f"plan_everyk_k{int(k)}",
+                    }
+                )
+        else:
+            out.append({"controller": name, "replan_k": None, "policy_dir": name})
+    return out
+
+
+def _expand_jobs(args: argparse.Namespace) -> list[dict]:
+    """Scene jobs with policy as the inner loop (same seed, then vanilla / each K)."""
+    policies = _policies(args)
+    expanded = []
+    for scene in _jobs(args):
+        for pol in policies:
+            expanded.append({**scene, **pol})
+    return expanded
+
+
+def _output_root(args: argparse.Namespace, job: dict) -> Path:
+    root = Path(args.output).expanduser()
+    policies = _policies(args)
+    if len(policies) > 1:
+        return root / str(job.get("policy_dir") or job.get("controller") or "policy")
+    return root
+
+
 def _job_out_dir(args: argparse.Namespace, job: dict) -> Path:
     cluttered = bool(args.cluttered)
     t = _corridor_t(job["seed"])
@@ -192,12 +247,7 @@ def _job_out_dir(args: argparse.Namespace, job: dict) -> Path:
     )
     if cluttered:
         tag += "_clutter"
-    return (
-        Path(args.output).expanduser()
-        / job["task"]
-        / job["embodiment"]
-        / tag
-    )
+    return _output_root(args, job) / job["task"] / job["embodiment"] / tag
 
 
 def _existing_summary(out_dir: Path) -> dict | None:
@@ -229,33 +279,48 @@ def _to_run_args(args: argparse.Namespace, job: dict):
         unsafe_level=args.unsafe_level,
         arm="auto",
         draw_bbox=args.draw_bbox,
-        controller=args.controller,
+        controller=job.get("controller", args.controller),
         msaa=getattr(args, "msaa", 2),
         video_res=getattr(args, "video_res", "320x240"),
         record_every=args.record_every,
         fps=args.fps,
-        output=args.output,
+        output=_output_root(args, job),
+        replan_k=int(job["replan_k"] if job.get("replan_k") is not None else getattr(args, "replan_k", 20)),
+        replan_max=int(getattr(args, "replan_max", 2500)),
+        mpc_window_max=int(getattr(args, "mpc_window_max", 150)),
     )
 
 
 def main() -> None:
     args = parse_args()
-    ctrl_cls = CONTROLLERS.get(args.controller, ResidualController)
+    policies = _policies(args)
+    try:
+        ctrl_cls = controller_class(policies[0]["controller"])
+    except KeyError:
+        ctrl_cls = CONTROLLERS.get(policies[0]["controller"], ResidualController)
     ctrl_cls.install()
-    jobs = _jobs(args)
+    jobs = _expand_jobs(args)
     resume = bool(args.resume) and not bool(args.overwrite)
     n_skip = 0
     if resume:
         n_skip = sum(1 for job in jobs if _existing_summary(_job_out_dir(args, job)) is not None)
+    pol_txt = ", ".join(
+        p["policy_dir"] if p["replan_k"] is None else f"{p['controller']}(k={p['replan_k']})"
+        for p in policies
+    )
     print(
-        f"{len(jobs)} episodes  preset={args.preset}  output={args.output}"
+        f"{len(jobs)} runs  {len(jobs) // max(len(policies), 1)} scenes × {len(policies)} policies  "
+        f"preset={args.preset}  policies=[{pol_txt}]  output={args.output}"
         + (f"  resume skip={n_skip} remaining={len(jobs) - n_skip}" if resume else "")
     )
     results = []
     for i, job in enumerate(jobs):
+        ctrl = job.get("controller", args.controller)
+        k = job.get("replan_k")
         print(
             f"\n=== [{i + 1}/{len(jobs)}] {job['task']} {job['embodiment']} "
-            f"seed={job['seed']} {job['obstacle_mode']} {job['place_mode']} {job['plan_mode']} ==="
+            f"seed={job['seed']} {job['obstacle_mode']} {job['place_mode']} {job['plan_mode']} "
+            f"ctrl={ctrl}" + (f" k={k}" if k is not None else "") + " ==="
         )
         if resume:
             existing = _existing_summary(_job_out_dir(args, job))
@@ -283,12 +348,13 @@ def main() -> None:
 
     out = Path(args.output).expanduser()
     out.mkdir(parents=True, exist_ok=True)
-    summary_path = out / f"sweep_{args.preset}_seed{args.base_seed}.json"
+    tag = "multi" if len(policies) > 1 else str(policies[0]["controller"])
+    summary_path = out / f"sweep_{args.preset}_{tag}_seed{args.base_seed}.json"
     with summary_path.open("w", encoding="utf-8") as handle:
         json.dump(results, handle, indent=2, default=str)
     n_ok = sum(1 for r in results if r.get("success"))
     n_err = sum(1 for r in results if r.get("error"))
-    print(f"\nDone. {n_ok} success / {len(results)} episodes, {n_err} crashes.")
+    print(f"\nDone. {n_ok} success / {len(results)} runs, {n_err} crashes.")
     print(f"Wrote {summary_path}")
 
 

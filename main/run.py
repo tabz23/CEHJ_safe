@@ -45,7 +45,12 @@ Params and options (also `python run.py --help`):
 
   --draw-bbox         Also write debug_bbox.mp4 (CuRobo spheres + obstacle OBB).
 
-  --controller        residual | nominal   (default: residual; residual is 0 today)
+  --controller        residual | nominal | vanilla_play_once | plan_play_once_everyk
+                      (default: residual; residual is 0 today)
+                      vanilla_play_once     : current play_once (one plan per Action)
+                      plan_play_once_everyk : receding horizon, replan every --replan-k steps
+
+  --replan-k          For plan_play_once_everyk only (default 20).
 
 Examples:
   python run.py --task place_empty_cup --embodiment piper --obstacle-mode none --seed 0
@@ -68,15 +73,24 @@ MAIN_DIR = Path(__file__).resolve().parent
 if str(MAIN_DIR) not in sys.path:
     sys.path.insert(0, str(MAIN_DIR))
 
-from controller import CuroboIKController, ResidualController
+from controller import (
+    CONTROLLER_NAMES,
+    CuroboIKController,
+    ResidualController,
+    controller_class,
+    make_controller,
+)
 from env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE, Env
 from obstacle import choose_and_spawn, update_curobo_world
 from record import attach_recorder, detach_recorder, save_video, write_hold_trace
 from tasks import ALL_TASKS, resolve_arm, TASK_SPECS
+from timing import EpisodeClock
 
 CONTROLLERS = {
     "residual": ResidualController,
     "nominal": CuroboIKController,
+    "vanilla_play_once": controller_class("vanilla_play_once"),
+    "plan_play_once_everyk": controller_class("plan_play_once_everyk"),
 }
 
 DEFAULT_OUTPUT = CEHJ_ROOT / "outputs" / "ihab"
@@ -111,7 +125,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--arm", choices=("auto", "left", "right"), default="auto")
     parser.add_argument("--draw-bbox", action="store_true")
-    parser.add_argument("--controller", choices=tuple(CONTROLLERS), default="residual")
+    parser.add_argument("--controller", choices=CONTROLLER_NAMES, default="residual")
+    parser.add_argument(
+        "--replan-k",
+        type=int,
+        default=20,
+        help="For plan_play_once_everyk: execute this many joint steps, then replan.",
+    )
+    parser.add_argument(
+        "--mpc-window-max",
+        type=int,
+        default=150,
+        help="Max K-step window clips to save (plan_play_once_everyk). 0 = no cap.",
+    )
     parser.add_argument(
         "--msaa",
         type=int,
@@ -151,9 +177,16 @@ def _video_res(value: str) -> tuple[int, int]:
     return width, height
 
 
+def _controller_tag(args: argparse.Namespace) -> str:
+    name = str(getattr(args, "controller", "residual"))
+    if name == "plan_play_once_everyk":
+        return f"plan_everyk_k{int(getattr(args, 'replan_k', 20))}"
+    return name
+
+
 def _make_env(args: argparse.Namespace, seed: int) -> tuple[object, object]:
     cluttered = bool(args.cluttered) and not bool(args.no_cluttered)
-    ctrl_cls = CONTROLLERS[args.controller]
+    ctrl_cls = controller_class(args.controller)
     ctrl_cls.install()
     record_wh = _video_res(getattr(args, "video_res", f"{RECORD_SIZE[0]}x{RECORD_SIZE[1]}"))
     env = Env(
@@ -167,7 +200,12 @@ def _make_env(args: argparse.Namespace, seed: int) -> tuple[object, object]:
         observer_size=(record_wh[0] * 2, record_wh[1] * 2),
         record_size=record_wh,
     )
-    ctrl = ctrl_cls(env)
+    ctrl = make_controller(
+        args.controller,
+        env,
+        replan_k=int(getattr(args, "replan_k", 20)),
+        replan_max=int(getattr(args, "replan_max", 2500)),
+    )
     ctrl.attach()
     return env, ctrl
 
@@ -210,11 +248,16 @@ def run_episode(args: argparse.Namespace) -> dict:
         probe.close()
 
     env, ctrl = _make_env(args, args.seed)
+    clock = EpisodeClock()
+    ctrl.clock = clock
+    clock.wrap_scene(env.task.scene)
+    ctrl_tag = _controller_tag(args)
+    replan_k = int(getattr(args, "replan_k", 20)) if args.controller == "plan_play_once_everyk" else None
     print(
         f"{args.task} / {env.embodiment} seed={args.seed} "
         f"obstacle={args.obstacle_mode} place={args.place_mode} "
         f"plan={args.plan_mode} cluttered={cluttered} t={t:.2f} "
-        f"controller={type(ctrl).__name__} planner={type(env.robot.left_planner).__name__}"
+        f"controller={ctrl_tag} planner={type(env.robot.left_planner).__name__}"
     )
 
     actor, xyz, half, arm = choose_and_spawn(
@@ -241,6 +284,24 @@ def run_episode(args: argparse.Namespace) -> dict:
     elif xyz is not None:
         print("[run] CuRobo ignores safety_obstacle")
 
+    tag = (
+        f"{args.obstacle_mode}_{args.place_mode}_{args.plan_mode}_"
+        f"{_t_tag(t)}_seed{args.seed}"
+    )
+    if cluttered:
+        tag += "_clutter"
+    out_dir = Path(args.output).expanduser() / args.task / env.embodiment / tag
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.controller == "plan_play_once_everyk" and hasattr(ctrl, "window_dir"):
+        ctrl.window_dir = out_dir / "mpc_windows"
+        ctrl.window_draw_bbox = bool(args.draw_bbox)
+        ctrl.window_fps = 1.0
+        ctrl.window_max = int(getattr(args, "mpc_window_max", 150))
+        print(
+            f"[run] MPC window clips → {ctrl.window_dir}  "
+            f"1 fps ({ctrl.k} steps ≈ {ctrl.k}s of playback)  max={ctrl.window_max}"
+        )
+
     streams = {"agent_rgb": [], "left_wrist_rgb": [], "right_wrist_rgb": []}
     if args.draw_bbox:
         streams["debug_bbox"] = []
@@ -249,9 +310,13 @@ def run_episode(args: argparse.Namespace) -> dict:
         "plan_mode": args.plan_mode,
         "place_mode": args.place_mode,
         "seed": args.seed,
+        "controller": ctrl_tag,
+        "replan_k": replan_k,
+        "clock": clock,
     }
-    rec = attach_recorder(env, streams, args.record_every, overlay, args.draw_bbox)
+    rec = attach_recorder(env, streams, args.record_every, overlay, args.draw_bbox, clock=clock)
     play_error = None
+    clock.start()
     try:
         try:
             env.task.play_once()
@@ -259,6 +324,7 @@ def run_episode(args: argparse.Namespace) -> dict:
             play_error = str(exc)
             print(f"play_once failed: {exc}")
     finally:
+        clock.stop()
         detach_recorder(env, rec)
     print()
 
@@ -288,17 +354,12 @@ def run_episode(args: argparse.Namespace) -> dict:
         f"success={success} plan_success={plan_success} "
         f"dL={d_left} dR={d_right} dLh={d_left_held} dRh={d_right_held} dmin={d_min} "
         f"contact={any_contact} held={held_labels[-1] if held_labels else None} "
-        f"frames={len(streams['agent_rgb'])}"
+        f"frames={len(streams['agent_rgb'])} "
+        f"t_ep={clock.t_episode:.2f}s plan={clock.t_plan:.2f}s "
+        f"phys={clock.t_physics:.2f}s rend={clock.t_render:.2f}s "
+        f"n_plan={clock.n_plan} n_replan={clock.n_replan}"
     )
 
-    tag = (
-        f"{args.obstacle_mode}_{args.place_mode}_{args.plan_mode}_"
-        f"{_t_tag(t)}_seed{args.seed}"
-    )
-    if cluttered:
-        tag += "_clutter"
-    out_dir = args.output.expanduser() / args.task / env.embodiment / tag
-    out_dir.mkdir(parents=True, exist_ok=True)
     outputs = {}
     if streams["agent_rgb"]:
         for name, frames in streams.items():
@@ -306,6 +367,11 @@ def run_episode(args: argparse.Namespace) -> dict:
     else:
         print("[run] no frames recorded")
     hold_trace = str(write_hold_trace(rec.get("csv_rows", []), out_dir / "hold_trace.csv"))
+    plans_path = out_dir / "plans.jsonl"
+    with plans_path.open("w", encoding="utf-8") as handle:
+        for event in clock.plan_events:
+            handle.write(json.dumps(event) + "\n")
+    timing = clock.summary()
 
     summary = {
         "task": args.task,
@@ -315,6 +381,10 @@ def run_episode(args: argparse.Namespace) -> dict:
         "obstacle_mode": args.obstacle_mode,
         "place_mode": args.place_mode,
         "plan_mode": args.plan_mode,
+        "controller": args.controller,
+        "controller_tag": ctrl_tag,
+        "replan_k": replan_k,
+        "replan_max": int(getattr(args, "replan_max", 2500)) if args.controller == "plan_play_once_everyk" else None,
         "obstacle_t": t,
         "unsafe_level": getattr(args, "unsafe_level", None),
         "arm": arm,
@@ -335,11 +405,18 @@ def run_episode(args: argparse.Namespace) -> dict:
         "obstacle_xyz": None if xyz is None else xyz.tolist(),
         "videos": outputs,
         "hold_trace": hold_trace,
+        "plans": str(plans_path),
         "n_frames": len(streams["agent_rgb"]),
         "n_steps": rec.get("n", 0),
+        "n_plans": clock.n_plan,
+        "n_plan_ok": clock.n_plan_ok,
+        "n_plan_fail": clock.n_plan_fail,
+        "n_replans": clock.n_replan,
+        "n_mpc_windows": clock.n_mpc_windows,
+        "timing": timing,
     }
     with (out_dir / "summary.json").open("w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2)
+        json.dump(summary, handle, indent=2, default=str)
     env.close()
     return summary
 
@@ -350,7 +427,7 @@ def main() -> None:
         print(__doc__)
         return
     summary = run_episode(args)
-    print(json.dumps({k: v for k, v in summary.items() if k != "videos"}, indent=2))
+    print(json.dumps({k: v for k, v in summary.items() if k != "videos"}, indent=2, default=str))
     for name, path in summary.get("videos", {}).items():
         print(f"  {name}: {path}")
 
