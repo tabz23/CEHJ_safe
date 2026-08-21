@@ -72,6 +72,7 @@ python "${ROOT}/main/run_all.py" \
   "$@"
 
 
+
 python "${ROOT}/main/aggregate_plank.py" "${OUT_ROOT}"
 echo "Done. Compare ${OUT_ROOT}/latency_compare.csv"
 echo "Each scene ran vanilla then K=20,50,70 before the next scene."
