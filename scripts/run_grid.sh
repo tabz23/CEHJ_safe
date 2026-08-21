@@ -13,6 +13,7 @@ EPISODES="${2:-1}"
 BASE_SEED="${3:-0}"
 shift $(( $# >= 3 ? 3 : $# )) || true
 export PYTHONNOUSERSITE=1
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 python "${ROOT}/main/run_all.py" \
   --preset "${PRESET}" \
   --episodes "${EPISODES}" \

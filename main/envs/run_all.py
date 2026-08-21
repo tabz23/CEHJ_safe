@@ -23,15 +23,19 @@ import json
 import sys
 from pathlib import Path
 
-MAIN_DIR = Path(__file__).parent
-sys.path.insert(0, str(MAIN_DIR))
+if __package__ in (None, ""):
+    _cehj = str(Path(__file__).resolve().parents[2])
+    if _cehj not in sys.path:
+        sys.path.insert(0, _cehj)
+    __package__ = "main.envs"
+    import main.envs  # noqa: F401  ensure parent package exists for relative imports
 
 from argparse import Namespace
 
-from controller import ResidualController, controller_class
-from env import CEHJ_ROOT, resolve_embodiment
-from run import CONTROLLERS, run_episode, _corridor_t, _t_tag
-from tasks import BIMANUAL_TASKS, EMBODIMENTS, SAFETY_TASKS, SWEEP_EMBODIMENTS
+from .controller import ResidualController, controller_class
+from .env import CEHJ_ROOT, resolve_embodiment
+from .run import CONTROLLERS, run_episode, _corridor_t, _t_tag
+from .tasks import BIMANUAL_TASKS, EMBODIMENTS, SAFETY_TASKS, SWEEP_EMBODIMENTS
 
 ALIASES = {
     "piper": "piper",

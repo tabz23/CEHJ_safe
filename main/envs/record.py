@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from distance import (
+from .distance import (
     detect_held_by_arm,
     distance_info,
     is_gripper_link,
@@ -16,7 +16,7 @@ from distance import (
     sphere_aabb_corners,
     spheres_with_names,
 )
-from env import RECORD_SIZE
+from .env import RECORD_SIZE
 
 
 def observer_rgb(task) -> np.ndarray:

@@ -22,7 +22,7 @@
 set -euo pipefail
 ROOT="/storage1/fs1/sibai/Active/yuxuan/cross_embodiment/CEHJ"
 export PYTHONNOUSERSITE=1
-
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 python "${ROOT}/main/run_all.py" \
   --preset grid \
@@ -32,9 +32,9 @@ python "${ROOT}/main/run_all.py" \
   --obstacle-modes on_path \
   --place-mode geometric \
   --plan-mode ignore_obstacle \
-  --episodes 3 \
+  --episodes 1 \
   --base-seed 12 \
-  --output "${ROOT}/outputs/ihab/safe_unsafe_bimanual good" \
+  --output "${ROOT}/outputs/ihabnew/safe_unsafe_bimanual" \
   --draw-bbox \
   --resume \
   "$@"

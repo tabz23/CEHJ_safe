@@ -25,7 +25,7 @@ os.environ["SAPIEN_DISABLE_RAY_TRACING"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 CEHJ_ROOT = Path(__file__).resolve().parents[1]
-ROBOTWIN_ROOT = CEHJ_ROOT.parent / "RoboTwin"
+ROBOTWIN_ROOT = CEHJ_ROOT / "RoboTwin"
 DEFAULT_OUTPUT = CEHJ_ROOT / "outputs" / "piper_place_empty_cup"
 
 

@@ -21,6 +21,7 @@
 set -euo pipefail
 ROOT="/storage1/fs1/sibai/Active/yuxuan/cross_embodiment/CEHJ"
 export PYTHONNOUSERSITE=1
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 python "${ROOT}/main/run_all.py" \
   --preset grid \

@@ -69,22 +69,26 @@ from pathlib import Path
 
 import numpy as np
 
-MAIN_DIR = Path(__file__).resolve().parent
-if str(MAIN_DIR) not in sys.path:
-    sys.path.insert(0, str(MAIN_DIR))
+if __package__ in (None, ""):
+    _cehj = str(Path(__file__).resolve().parents[2])
+    if _cehj not in sys.path:
+        sys.path.insert(0, _cehj)
+    __package__ = "main.envs"
+    import main.envs  # noqa: F401  ensure parent package exists for relative imports
 
-from controller import (
+from main.timing import EpisodeClock
+
+from .controller import (
     CONTROLLER_NAMES,
     CuroboIKController,
     ResidualController,
     controller_class,
     make_controller,
 )
-from env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE, Env
-from obstacle import choose_and_spawn, update_curobo_world
-from record import attach_recorder, detach_recorder, save_video, write_hold_trace
-from tasks import ALL_TASKS, resolve_arm, TASK_SPECS
-from timing import EpisodeClock
+from .env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE, Env
+from .obstacle import choose_and_spawn, update_curobo_world
+from .record import attach_recorder, detach_recorder, save_video, write_hold_trace
+from .tasks import ALL_TASKS, resolve_arm, TASK_SPECS
 
 CONTROLLERS = {
     "residual": ResidualController,

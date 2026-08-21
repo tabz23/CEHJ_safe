@@ -38,12 +38,12 @@
 
 set -euo pipefail
 ROOT="/storage1/fs1/sibai/Active/yuxuan/cross_embodiment/CEHJ"
-OUT_ROOT="${ROOT}/outputs/ihab/safe_unsafe_bimanual_plank"
+OUT_ROOT="${ROOT}/outputs/ihabnew/safe_unsafe_bimanual_plank"
 mkdir -p "${OUT_ROOT}/logs"
 
 export PYTHONNOUSERSITE=1
 export PYTHONUNBUFFERED=1
-export PYTHONPATH="${ROOT}/main${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export CONDA_ENVS_DIRS="${CONDA_ENVS_DIRS:-/storage1/fs1/sibai/Active/yuxuan/conda/envs}"
 export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-/storage1/fs1/sibai/Active/yuxuan/conda/pkgs}"
 

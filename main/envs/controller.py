@@ -19,11 +19,10 @@ from typing import Callable
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from main.timing import EpisodeClock, cuda_sync
 
-from env import Env, prepare
-from record import grab_window_frame, save_video
-from timing import EpisodeClock, cuda_sync
+from .env import Env, prepare
+from .record import grab_window_frame, save_video
 
 ResidualFn = Callable[..., np.ndarray]
 
@@ -83,9 +82,10 @@ class CuroboIKController:
     @staticmethod
     def install() -> None:
         prepare()
-        from obstacle import patch_curobo_collision_cache
         from envs.robot.planner import CuroboPlanner, MplibPlanner
         from envs.robot.robot import Robot
+
+        from .obstacle import patch_curobo_collision_cache
 
         patch_curobo_collision_cache()
         if getattr(Robot.set_planner, "_cehj_installed", False):

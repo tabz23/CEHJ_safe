@@ -13,7 +13,9 @@ from pathlib import Path
 import yaml
 
 CEHJ_ROOT = Path(__file__).resolve().parent.parent.parent
-ROBOTWIN_ROOT = CEHJ_ROOT.parent / "RoboTwin"
+ROBOTWIN_ROOT = CEHJ_ROOT / "RoboTwin"
+if not ROBOTWIN_ROOT.is_dir():
+    ROBOTWIN_ROOT = CEHJ_ROOT.parent / "RoboTwin"
 
 # Render observer at 2x, then downsample to stock 320x240 for saved videos.
 # 2x SSAA + MSAA 2 is a mild cost bump (one extra camera, every record step).
@@ -296,9 +298,11 @@ def _task_args(
         }
     )
     args["camera"] = dict(args.get("camera") or {})
+    # RoboTwin `_camera_config.yml` only lists D435 / Large_D435 / L515.
+    # D435_256 was an HJ-encoder leftover and KeyErrors every eval episode.
+    args["camera"].setdefault("head_camera_type", "D435")
+    args["camera"].setdefault("wrist_camera_type", "D435")
     args["camera"].update(
-        head_camera_type="D435_256",
-        wrist_camera_type="D435_256",
         collect_head_camera=True,
         collect_wrist_camera=True,
     )

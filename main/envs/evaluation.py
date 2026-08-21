@@ -1,7 +1,7 @@
 """Run the task expert with ResidualController (default) and record videos.
 
     conda activate rbtw128
-    python /storage1/fs1/sibai/Active/yuxuan/cross_embodiment/CEHJ/main/evaluation.py
+    python /storage1/fs1/sibai/Active/yuxuan/cross_embodiment/CEHJ/main/envs/evaluation.py
     python .../evaluation.py --embodiment ur5 --task place_dual_shoes
     python .../evaluation.py --controller nominal
 """
@@ -18,8 +18,11 @@ if __package__ in (None, ""):
     import sys
     from pathlib import Path
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    _cehj = str(Path(__file__).resolve().parents[2])
+    if _cehj not in sys.path:
+        sys.path.insert(0, _cehj)
     __package__ = "main.envs"
+    import main.envs  # noqa: F401
 
 from .controller import CuroboIKController, ResidualController
 from .env import CEHJ_ROOT, Env, RECORD_SIZE
