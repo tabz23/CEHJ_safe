@@ -23,16 +23,19 @@ import json
 import sys
 from pathlib import Path
 
-MAIN_DIR = Path(__file__).resolve().parent
-if str(MAIN_DIR) not in sys.path:
-    sys.path.insert(0, str(MAIN_DIR))
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    __package__ = "main.envs"
 
 from argparse import Namespace
 
-from controller import ResidualController
-from env import CEHJ_ROOT, resolve_embodiment
-from run import CONTROLLERS, run_episode, _corridor_t, _t_tag
-from tasks import BIMANUAL_TASKS, EMBODIMENTS, SAFETY_TASKS, SWEEP_EMBODIMENTS
+from .controller import ResidualController
+from .env import CEHJ_ROOT, resolve_embodiment
+from .run import CONTROLLERS, run_episode, _corridor_t, _t_tag
+from .tasks import BIMANUAL_TASKS, EMBODIMENTS, SAFETY_TASKS, SWEEP_EMBODIMENTS
 
 ALIASES = {
     "piper": "piper",

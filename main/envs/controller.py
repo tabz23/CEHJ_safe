@@ -15,7 +15,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from env import Env, prepare
+from .env import Env, prepare
 
 ResidualFn = Callable[..., np.ndarray]
 
@@ -64,7 +64,7 @@ class CuroboIKController:
     @staticmethod
     def install() -> None:
         prepare()
-        from obstacle import patch_curobo_collision_cache
+        from .obstacle import patch_curobo_collision_cache
         from envs.robot.planner import CuroboPlanner, MplibPlanner
         from envs.robot.robot import Robot
 

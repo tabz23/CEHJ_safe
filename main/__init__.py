@@ -1,6 +1,6 @@
-from .controller import CuroboIKController, ResidualController
-from .env import Env
-from .tasks import EMBODIMENTS, SAFETY_TASKS
+from .envs.controller import CuroboIKController, ResidualController
+from .envs.env import Env
+from .envs.tasks import EMBODIMENTS, SAFETY_TASKS
 
 __all__ = [
     "Env",

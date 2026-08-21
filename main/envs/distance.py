@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from obstacle import OBSTACLE_NAME, load_collision_spheres, world_center_and_half
+from .obstacle import OBSTACLE_NAME, load_collision_spheres, world_center_and_half
 
 
 def _link_pose(link):
@@ -267,7 +267,7 @@ def _holding_text(left_label: str, right_label: str) -> str:
 
 
 def _iter_task_actors(env):
-    from tasks import TASK_SPECS, iter_named_actors, spec_grasp_names
+    from .tasks import TASK_SPECS, iter_named_actors, spec_grasp_names
 
     spec = TASK_SPECS.get(getattr(env, "task_name", ""), {})
     obstacle = getattr(env, "obstacle", None)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from distance import (
+from .distance import (
     detect_held_by_arm,
     distance_info,
     is_gripper_link,
@@ -16,7 +16,7 @@ from distance import (
     sphere_aabb_corners,
     spheres_with_names,
 )
-from env import RECORD_SIZE
+from .env import RECORD_SIZE
 
 
 def observer_rgb(task) -> np.ndarray:
@@ -381,6 +381,8 @@ def attach_recorder(env, streams: dict, record_every: int, overlay: dict, draw_b
             streams["debug_bbox"].append(_put_text(to_record_size(debug, rec_wh), lines))
         streams["left_wrist_rgb"].append(np.asarray(obs["left_camera"]["rgb"], dtype=np.uint8))
         streams["right_wrist_rgb"].append(np.asarray(obs["right_camera"]["rgb"], dtype=np.uint8))
+        if "head_rgb" in streams and "head_camera" in obs:
+            streams["head_rgb"].append(np.asarray(obs["head_camera"]["rgb"], dtype=np.uint8))
         print(
             f"recorded {len(streams['agent_rgb'])} frames  "
             f"HOLD L={hold_l} R={hold_r} dmin={_cm(info['d_min'])}",

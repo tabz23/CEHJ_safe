@@ -64,15 +64,18 @@ from pathlib import Path
 
 import numpy as np
 
-MAIN_DIR = Path(__file__).resolve().parent
-if str(MAIN_DIR) not in sys.path:
-    sys.path.insert(0, str(MAIN_DIR))
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path
 
-from controller import CuroboIKController, ResidualController
-from env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE, Env
-from obstacle import choose_and_spawn, update_curobo_world
-from record import attach_recorder, detach_recorder, save_video, write_hold_trace
-from tasks import ALL_TASKS, resolve_arm, TASK_SPECS
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    __package__ = "main.envs"
+
+from .controller import CuroboIKController, ResidualController
+from .env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE, Env
+from .obstacle import choose_and_spawn, update_curobo_world
+from .record import attach_recorder, detach_recorder, save_video, write_hold_trace
+from .tasks import ALL_TASKS, resolve_arm, TASK_SPECS
 
 CONTROLLERS = {
     "residual": ResidualController,
@@ -241,7 +244,7 @@ def run_episode(args: argparse.Namespace) -> dict:
     elif xyz is not None:
         print("[run] CuRobo ignores safety_obstacle")
 
-    streams = {"agent_rgb": [], "left_wrist_rgb": [], "right_wrist_rgb": []}
+    streams = {"agent_rgb": [], "left_wrist_rgb": [], "right_wrist_rgb": [], "head_rgb": []}
     if args.draw_bbox:
         streams["debug_bbox"] = []
     overlay = {
