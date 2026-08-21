@@ -65,6 +65,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -76,7 +77,7 @@ if __package__ in (None, ""):
     __package__ = "main.envs"
     import main.envs  # noqa: F401  ensure parent package exists for relative imports
 
-from main.timing import EpisodeClock
+from main.timing import EpisodeClock, log_time
 
 from .controller import (
     CONTROLLER_NAMES,
@@ -141,6 +142,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=150,
         help="Max K-step window clips to save (plan_play_once_everyk). 0 = no cap.",
+    )
+    parser.add_argument(
+        "--no-mpc-windows",
+        action="store_true",
+        help="Do not write mpc_windows/*.mp4 debug clips (episode videos still saved).",
     )
     parser.add_argument(
         "--msaa",
@@ -251,9 +257,19 @@ def run_episode(args: argparse.Namespace) -> dict:
         print(f"[run] recorded {len(ee_path)} EE waypoints on {arm}")
         probe.close()
 
+    CuroboIKController.reset_session_timers()
+    t_env = time.perf_counter()
     env, ctrl = _make_env(args, args.seed)
+    dt_env = time.perf_counter() - t_env
+    log_time("setup env+robot+planners", dt_env)
+
     clock = EpisodeClock()
     ctrl.clock = clock
+    clock.t_setup_env = dt_env
+    clock.t_curobo_warmup = CuroboIKController._session_warmup_s
+    clock.t_curobo_reuse = CuroboIKController._session_reuse_s
+    clock.n_curobo_warmup = CuroboIKController._session_warmup_n
+    clock.n_curobo_reuse = CuroboIKController._session_reuse_n
     clock.wrap_scene(env.task.scene)
     ctrl_tag = _controller_tag(args)
     replan_k = int(getattr(args, "replan_k", 20)) if args.controller == "plan_play_once_everyk" else None
@@ -264,6 +280,7 @@ def run_episode(args: argparse.Namespace) -> dict:
         f"controller={ctrl_tag} planner={type(env.robot.left_planner).__name__}"
     )
 
+    t_spawn = time.perf_counter()
     actor, xyz, half, arm = choose_and_spawn(
         env,
         args.obstacle_mode,
@@ -272,10 +289,13 @@ def run_episode(args: argparse.Namespace) -> dict:
         arm,
         ee_path=ee_path,
     )
+    clock.t_spawn = time.perf_counter() - t_spawn
+    log_time("spawn obstacle", clock.t_spawn, mode=args.obstacle_mode)
+
     env.obstacle = actor
     env.obstacle_xyz = xyz
     env.obstacle_half = half
-    # Cached MotionGen may still hold a cuboid from a previous episode.
+    t_world = time.perf_counter()
     update_curobo_world(env.robot)
     if args.plan_mode == "no_ignore_obstacle" and xyz is not None:
         obs = env.obstacle
@@ -287,6 +307,8 @@ def run_episode(args: argparse.Namespace) -> dict:
         print("[run] CuRobo world includes safety_obstacle")
     elif xyz is not None:
         print("[run] CuRobo ignores safety_obstacle")
+    clock.t_world = time.perf_counter() - t_world
+    log_time("update CuRobo world", clock.t_world)
 
     tag = (
         f"{args.obstacle_mode}_{args.place_mode}_{args.plan_mode}_"
@@ -296,7 +318,11 @@ def run_episode(args: argparse.Namespace) -> dict:
         tag += "_clutter"
     out_dir = Path(args.output).expanduser() / args.task / env.embodiment / tag
     out_dir.mkdir(parents=True, exist_ok=True)
-    if args.controller == "plan_play_once_everyk" and hasattr(ctrl, "window_dir"):
+    if (
+        args.controller == "plan_play_once_everyk"
+        and hasattr(ctrl, "window_dir")
+        and not bool(getattr(args, "no_mpc_windows", False))
+    ):
         ctrl.window_dir = out_dir / "mpc_windows"
         ctrl.window_draw_bbox = bool(args.draw_bbox)
         ctrl.window_fps = 1.0
@@ -305,6 +331,8 @@ def run_episode(args: argparse.Namespace) -> dict:
             f"[run] MPC window clips → {ctrl.window_dir}  "
             f"1 fps ({ctrl.k} steps ≈ {ctrl.k}s of playback)  max={ctrl.window_max}"
         )
+    elif args.controller == "plan_play_once_everyk":
+        print("[run] MPC window clips disabled (--no-mpc-windows)")
 
     streams = {"agent_rgb": [], "left_wrist_rgb": [], "right_wrist_rgb": []}
     if args.draw_bbox:
@@ -333,10 +361,13 @@ def run_episode(args: argparse.Namespace) -> dict:
     print()
 
     success = False
+    t_ok = time.perf_counter()
     try:
         success = bool(env.task.check_success())
     except Exception as exc:
         print(f"check_success warning: {exc}")
+    clock.t_check_success = time.perf_counter() - t_ok
+    log_time("check_success", clock.t_check_success, success=success)
     plan_success = getattr(env.task, "plan_success", None)
 
     def _min_finite(vals):
@@ -360,17 +391,26 @@ def run_episode(args: argparse.Namespace) -> dict:
         f"contact={any_contact} held={held_labels[-1] if held_labels else None} "
         f"frames={len(streams['agent_rgb'])} "
         f"t_ep={clock.t_episode:.2f}s plan={clock.t_plan:.2f}s "
-        f"phys={clock.t_physics:.2f}s rend={clock.t_render:.2f}s "
-        f"n_plan={clock.n_plan} n_replan={clock.n_replan}"
+        f"(first={clock.t_plan_initial:.2f}s n={clock.n_plan_initial} "
+        f"replan={clock.t_plan_replan:.2f}s n={clock.n_replan}) "
+        f"phys={clock.t_physics:.2f}s cam={clock.t_render:.2f}s dist={clock.t_metric:.2f}s "
+        f"n_plan={clock.n_plan}"
     )
 
     outputs = {}
     if streams["agent_rgb"]:
         for name, frames in streams.items():
+            t_vid = time.perf_counter()
             outputs[name] = str(save_video(frames, out_dir / f"{name}.mp4", args.fps))
+            dt_vid = time.perf_counter() - t_vid
+            clock.add("video_encode", dt_vid)
+            log_time(f"episode mp4 {name}", dt_vid, n_frames=len(frames))
     else:
         print("[run] no frames recorded")
+    t_hold = time.perf_counter()
     hold_trace = str(write_hold_trace(rec.get("csv_rows", []), out_dir / "hold_trace.csv"))
+    clock.t_hold_trace = time.perf_counter() - t_hold
+    log_time("hold_trace.csv", clock.t_hold_trace, n_rows=len(rec.get("csv_rows") or []))
     plans_path = out_dir / "plans.jsonl"
     with plans_path.open("w", encoding="utf-8") as handle:
         for event in clock.plan_events:
@@ -415,10 +455,12 @@ def run_episode(args: argparse.Namespace) -> dict:
         "n_plans": clock.n_plan,
         "n_plan_ok": clock.n_plan_ok,
         "n_plan_fail": clock.n_plan_fail,
+        "n_plan_initial": clock.n_plan_initial,
         "n_replans": clock.n_replan,
         "n_mpc_windows": clock.n_mpc_windows,
         "timing": timing,
     }
+    clock.dump()
     with (out_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, default=str)
     env.close()

@@ -450,6 +450,18 @@ def attach_recorder(
         if clock is not None:
             with clock.span("render"):
                 _record_cameras()
+            n_f = len(streams.get("agent_rgb") or [])
+            if n_f and n_f % 50 == 0:
+                from main.timing import log_time
+
+                log_time(
+                    "episode cameras running",
+                    clock.t_render,
+                    n_frames=n_f,
+                    dist_s=round(clock.t_metric, 3),
+                    phys_s=round(clock.t_physics, 3),
+                    plan_s=round(clock.t_plan, 3),
+                )
         else:
             _record_cameras()
 

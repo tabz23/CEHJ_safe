@@ -19,7 +19,7 @@ from typing import Callable
 
 import numpy as np
 
-from main.timing import EpisodeClock, cuda_sync
+from main.timing import EpisodeClock, cuda_sync, log_time
 
 from .env import Env, prepare
 from .record import grab_window_frame, save_video
@@ -43,6 +43,17 @@ class CuroboIKController:
     """
 
     _curobo_cache: dict = {}
+    _session_warmup_s = 0.0
+    _session_reuse_s = 0.0
+    _session_warmup_n = 0
+    _session_reuse_n = 0
+
+    @classmethod
+    def reset_session_timers(cls) -> None:
+        cls._session_warmup_s = 0.0
+        cls._session_reuse_s = 0.0
+        cls._session_warmup_n = 0
+        cls._session_reuse_n = 0
 
     @staticmethod
     def drop_other_curobo(yml_path: str) -> None:
@@ -95,6 +106,7 @@ class CuroboIKController:
         orig_curobo_init = CuroboPlanner.__init__
 
         def _cached_curobo_init(self, robot_origion_pose, active_joints_name, all_joints, yml_path=None):
+            t_init = time.perf_counter()
             CuroboIKController.drop_other_curobo(str(yml_path))
             p = np.asarray(getattr(robot_origion_pose, "p"), dtype=np.float64)
             key = (str(yml_path), tuple(np.round(p, 3).tolist()))
@@ -107,7 +119,14 @@ class CuroboIKController:
                 self.frame_bias = hit["frame_bias"]
                 self.motion_gen = hit["motion_gen"]
                 self.motion_gen_batch = hit["motion_gen_batch"]
-                print(f"[controller] reuse CuRobo ({Path(str(yml_path)).name})")
+                dt = time.perf_counter() - t_init
+                CuroboIKController._session_reuse_s += dt
+                CuroboIKController._session_reuse_n += 1
+                log_time(
+                    f"curobo REUSE {Path(str(yml_path)).name}",
+                    dt,
+                    n_reuse=CuroboIKController._session_reuse_n,
+                )
                 return
             print(f"[controller] warmup CuRobo ({Path(str(yml_path)).name}) ...")
             orig_curobo_init(
@@ -122,6 +141,14 @@ class CuroboIKController:
                 "motion_gen": self.motion_gen,
                 "motion_gen_batch": self.motion_gen_batch,
             }
+            dt = time.perf_counter() - t_init
+            CuroboIKController._session_warmup_s += dt
+            CuroboIKController._session_warmup_n += 1
+            log_time(
+                f"curobo WARMUP {Path(str(yml_path)).name}",
+                dt,
+                n_warmup=CuroboIKController._session_warmup_n,
+            )
 
         CuroboPlanner.__init__ = _cached_curobo_init
 
@@ -787,6 +814,7 @@ class PlanEveryKController(ResidualController):
                 err_l = _ee_err(self.robot, "left", (left_arm or {}).get("_cehj_target_pose"))
                 err_r = _ee_err(self.robot, "right", (right_arm or {}).get("_cehj_target_pose"))
                 skill = current_skill(task) or "skill=?"
+                t_grab = time.perf_counter()
                 frames.append(
                     grab_window_frame(
                         self.env,
@@ -799,6 +827,8 @@ class PlanEveryKController(ResidualController):
                         draw_bbox=self.window_draw_bbox,
                     )
                 )
+                if self.clock is not None:
+                    self.clock.add("window_grab", time.perf_counter() - t_grab)
         if left_arm is not None:
             _finish_open_arm(self, "left", n_exec=min(int(n_chunk), _n_wp(left_arm)))
         if right_arm is not None:
@@ -815,10 +845,24 @@ class PlanEveryKController(ResidualController):
                 print(f"[mpc] window clips capped at {self.window_max}")
             return
         path = self.window_dir / f"w{self._window_i:04d}_k{self.k}_n{int(n_chunk)}.mp4"
+        t0 = time.perf_counter()
         try:
             save_video(frames, path, self.window_fps)
         except Exception as exc:
             print(f"[mpc] window clip failed: {exc}")
+            return
+        dt = time.perf_counter() - t0
+        if self.clock is not None:
+            self.clock.add("window_encode", dt)
+            self.clock.n_window_clips += 1
+            log_time(
+                f"window_encode w{self._window_i:04d}",
+                dt,
+                n_frames=len(frames),
+                k=self.k,
+                cum_encode_s=round(self.clock.t_window_encode, 3),
+                cum_grab_s=round(self.clock.t_window_grab, 3),
+            )
 
     def _mpc_take_dense_action(self, orig, control_seq, save_freq=-1):
         left_arm = control_seq.get("left_arm")

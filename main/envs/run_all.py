@@ -133,6 +133,11 @@ def parse_args() -> argparse.Namespace:
         help="Re-run everything even if --resume would skip it.",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--no-mpc-windows",
+        action="store_true",
+        help="Do not write mpc_windows/*.mp4 debug clips (episode videos still saved).",
+    )
     return parser.parse_args()
 
 
@@ -292,6 +297,7 @@ def _to_run_args(args: argparse.Namespace, job: dict):
         replan_k=int(job["replan_k"] if job.get("replan_k") is not None else getattr(args, "replan_k", 20)),
         replan_max=int(getattr(args, "replan_max", 2500)),
         mpc_window_max=int(getattr(args, "mpc_window_max", 150)),
+        no_mpc_windows=bool(getattr(args, "no_mpc_windows", False)),
     )
 
 
