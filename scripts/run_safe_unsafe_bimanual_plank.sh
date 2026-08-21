@@ -66,9 +66,10 @@ python "${ROOT}/main/run_all.py" \
   --draw-bbox \
   --resume \
   --controllers vanilla_play_once,plan_play_once_everyk \
-  --replan-ks 80,75,70,20,5 \
+  --replan-ks 80,75,70,50,40 \
   --output "${OUT_ROOT}" \
   "$@"
+
 
 python "${ROOT}/main/aggregate_plank.py" "${OUT_ROOT}"
 echo "Done. Compare ${OUT_ROOT}/latency_compare.csv"

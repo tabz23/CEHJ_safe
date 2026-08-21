@@ -675,7 +675,7 @@ class PlanEveryKController(ResidualController):
         self.window_dir: Path | None = None
         self.window_draw_bbox = False
         self.window_fps = 1.0
-        self.window_max = 150
+        self.window_max = 400
         self._window_i = 0
         self._window_frames: list = []
 
