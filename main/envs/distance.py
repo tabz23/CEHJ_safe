@@ -64,7 +64,15 @@ def _obb_from_actor(actor, half=None) -> tuple[np.ndarray, np.ndarray, np.ndarra
     center, auto_half = world_center_and_half(cfg)
     origin = np.asarray(pose.p, dtype=np.float64) + rot @ center
     if half is not None:
-        return origin, rot, np.asarray(half, dtype=np.float64)
+        half_arr = np.asarray(half, dtype=np.float64)
+        # Prefer JSON-scaled AABB if a caller passed unscaled model-unit extents (~1 m).
+        if (
+            float(np.max(np.abs(auto_half))) > 1e-6
+            and float(np.max(np.abs(half_arr))) > 0.4
+            and float(np.max(np.abs(auto_half))) < 0.3
+        ):
+            return origin, rot, auto_half
+        return origin, rot, half_arr
     return origin, rot, auto_half
 
 

@@ -23,9 +23,24 @@ Params and options (also `python run.py --help`):
                       Default: --no-cluttered.
 
   --obstacle-mode     none | off_path | on_path   (default: none)
-                      none     : no wooden block
-                      off_path : block on table, beside the expert EE→target line
-                      on_path  : block on that line (should hit if plan ignores it)
+                      none     : no safety obstacle
+                      off_path : obstacle on table, beside the expert EE→target line
+                      on_path  : obstacle on that line (should hit if plan ignores it)
+
+  --obstacle-model    RoboTwin-OD assets/objects/<name> (default: 086_woodenblock).
+                      Always spawned static. Distance / CuRobo use the scaled OBB.
+                      Presets (world AABB):
+                        086_woodenblock   cube    10.3 cm
+                        068_boxdrink      box     11.0 x 15.4 x 11.6 cm
+                        105_sauce-can     can     10.0 x 11.6 x 10.0 cm
+                        059_pencup        cup     9.8 x 11.7 x 9.8 cm
+                        071_can           can     7.1 x 9.6 x 7.1 cm
+                        101_milk-tea      cup     13.6 x 15.5 x 13.6 cm
+                        023_tissue-box    box     11.6 x 6.3 x 6.8 cm
+                        038_milk-box      carton  6.9 x 12.2 x 6.5 cm
+                        004_fluted-block  block   9.2 x 6.5 x 9.0 cm
+                        073_rubikscube    cube    6.5 x 6.8 x 7.7 cm
+                      Any other objects/<name> folder also works.
 
   --place-mode        geometric | waypoint   (default: geometric)
                       geometric : spawn between current EE and target (no extra plan)
@@ -34,8 +49,8 @@ Params and options (also `python run.py --help`):
 
   --plan-mode         ignore_obstacle | no_ignore_obstacle
                       (default: ignore_obstacle)
-                      ignore_obstacle      : CuRobo world = table only (can hit the block)
-                      no_ignore_obstacle   : add the block to CuRobo MotionGen and replan around it
+                      ignore_obstacle      : CuRobo world = table only (can hit the obstacle)
+                      no_ignore_obstacle   : add the obstacle to CuRobo MotionGen and replan around it
 
   --unsafe-level      ignored (kept so old scripts still parse). Placement t is
                       Uniform[0.3, 0.7] from the seed, same for none/off_path/on_path.
@@ -87,7 +102,12 @@ from .controller import (
     make_controller,
 )
 from .env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE, Env
-from .obstacle import choose_and_spawn, update_curobo_world
+from .obstacle import (
+    OBSTACLE_MODEL,
+    OBSTACLE_PRESETS,
+    choose_and_spawn,
+    update_curobo_world,
+)
 from .record import (
     EpisodeStepTimeout,
     attach_recorder,
@@ -122,6 +142,19 @@ def parse_args() -> argparse.Namespace:
         "--obstacle-mode",
         choices=("none", "off_path", "on_path"),
         default="none",
+    )
+    parser.add_argument(
+        "--obstacle-model",
+        default=OBSTACLE_MODEL,
+        help="RoboTwin-OD assets/objects/<name>, always static. "
+        + "; ".join(f"{k}={v}" for k, v in OBSTACLE_PRESETS.items())
+        + ". Any other objects/ folder also works.",
+    )
+    parser.add_argument(
+        "--obstacle-model-id",
+        type=int,
+        default=0,
+        help="model_data<id>.json variant (default 0).",
     )
     parser.add_argument("--place-mode", choices=("geometric", "waypoint"), default="geometric")
     parser.add_argument(
@@ -293,7 +326,8 @@ def run_episode(args: argparse.Namespace) -> dict:
     replan_k = int(getattr(args, "replan_k", 20)) if args.controller == "plan_play_once_everyk" else None
     print(
         f"{args.task} / {env.embodiment} seed={args.seed} "
-        f"obstacle={args.obstacle_mode} place={args.place_mode} "
+        f"obstacle={args.obstacle_mode} model={getattr(args, 'obstacle_model', OBSTACLE_MODEL)} "
+        f"place={args.place_mode} "
         f"plan={args.plan_mode} cluttered={cluttered} t={t:.2f} "
         f"controller={ctrl_tag} planner={type(env.robot.left_planner).__name__}"
     )
@@ -306,6 +340,8 @@ def run_episode(args: argparse.Namespace) -> dict:
         t,
         arm,
         ee_path=ee_path,
+        obstacle_model=getattr(args, "obstacle_model", OBSTACLE_MODEL),
+        obstacle_model_id=int(getattr(args, "obstacle_model_id", 0) or 0),
     )
     clock.t_spawn = time.perf_counter() - t_spawn
     log_time("spawn obstacle", clock.t_spawn, mode=args.obstacle_mode)
@@ -313,6 +349,7 @@ def run_episode(args: argparse.Namespace) -> dict:
     env.obstacle = actor
     env.obstacle_xyz = xyz
     env.obstacle_half = half
+    env.obstacle_model = getattr(args, "obstacle_model", OBSTACLE_MODEL)
     t_world = time.perf_counter()
     update_curobo_world(env.robot)
     if args.plan_mode == "no_ignore_obstacle" and xyz is not None:
@@ -361,6 +398,7 @@ def run_episode(args: argparse.Namespace) -> dict:
         streams["debug_bbox"] = []
     overlay = {
         "obstacle_mode": args.obstacle_mode,
+        "obstacle_model": getattr(args, "obstacle_model", OBSTACLE_MODEL),
         "plan_mode": args.plan_mode,
         "place_mode": args.place_mode,
         "seed": args.seed,
@@ -459,6 +497,8 @@ def run_episode(args: argparse.Namespace) -> dict:
         "seed": args.seed,
         "cluttered": cluttered,
         "obstacle_mode": args.obstacle_mode,
+        "obstacle_model": getattr(args, "obstacle_model", OBSTACLE_MODEL),
+        "obstacle_model_id": int(getattr(args, "obstacle_model_id", 0) or 0),
         "place_mode": args.place_mode,
         "plan_mode": args.plan_mode,
         "controller": args.controller,
@@ -485,6 +525,7 @@ def run_episode(args: argparse.Namespace) -> dict:
         "timed_out": timed_out,
         "max_steps": max_steps if max_steps > 0 else None,
         "obstacle_xyz": None if xyz is None else xyz.tolist(),
+        "obstacle_half": None if half is None else np.asarray(half, dtype=np.float64).tolist(),
         "videos": outputs,
         "hold_trace": hold_trace,
         "plans": str(plans_path),

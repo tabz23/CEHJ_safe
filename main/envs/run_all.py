@@ -14,6 +14,7 @@ Defaults (the main grid we discussed):
   python run_all.py --preset grid --draw-bbox
   python run_all.py --preset discussed --episodes 2 --base-seed 10
   python run_all.py --tasks place_empty_cup --embodiments piper,franka --obstacle-modes on_path
+  python run_all.py --obstacle-model 105_sauce-can --obstacle-modes on_path
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from argparse import Namespace
 
 from .controller import ResidualController, controller_class
 from .env import CEHJ_ROOT, resolve_embodiment
+from .obstacle import OBSTACLE_MODEL, OBSTACLE_PRESETS
 from .run import CONTROLLERS, run_episode, _corridor_t, _t_tag
 from .tasks import BIMANUAL_TASKS, EMBODIMENTS, SAFETY_TASKS, SWEEP_EMBODIMENTS
 
@@ -88,6 +90,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--embodiments", default="all")
     parser.add_argument("--obstacle-modes", default="none,off_path,on_path")
+    parser.add_argument(
+        "--obstacle-model",
+        default=OBSTACLE_MODEL,
+        help="RoboTwin-OD assets/objects/<name>, always static. "
+        + "; ".join(f"{k}={v}" for k, v in OBSTACLE_PRESETS.items())
+        + ". Any other objects/ folder also works.",
+    )
+    parser.add_argument(
+        "--obstacle-model-id",
+        type=int,
+        default=0,
+        help="model_data<id>.json variant (default 0).",
+    )
     parser.add_argument("--place-mode", default="geometric", choices=("geometric", "waypoint"))
     parser.add_argument(
         "--plan-mode",
@@ -301,6 +316,8 @@ def _to_run_args(args: argparse.Namespace, job: dict):
         cluttered=args.cluttered,
         no_cluttered=not args.cluttered,
         obstacle_mode=job["obstacle_mode"],
+        obstacle_model=getattr(args, "obstacle_model", OBSTACLE_MODEL),
+        obstacle_model_id=int(getattr(args, "obstacle_model_id", 0) or 0),
         place_mode=job["place_mode"],
         plan_mode=job["plan_mode"],
         unsafe_level=args.unsafe_level,

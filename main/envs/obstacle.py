@@ -1,4 +1,4 @@
-"""Spawn a static 086_woodenblock and optionally add it to CuRobo MotionGen."""
+"""Spawn a static RoboTwin-OD mesh as the safety obstacle and optionally add it to CuRobo."""
 
 from __future__ import annotations
 
@@ -22,7 +22,23 @@ from .tasks import (
 
 OBSTACLE_NAME = "safety_obstacle"
 OBSTACLE_MODEL = "086_woodenblock"
+# Documented presets (any assets/objects/<name> also works). Sizes are world AABB.
+OBSTACLE_PRESETS = {
+    "086_woodenblock": "cube 10.3 cm (default)",
+    "068_boxdrink": "box 11.0 x 15.4 x 11.6 cm",
+    "105_sauce-can": "can 10.0 x 11.6 x 10.0 cm",
+    "059_pencup": "cup 9.8 x 11.7 x 9.8 cm",
+    "071_can": "can 7.1 x 9.6 x 7.1 cm",
+    "101_milk-tea": "cup 13.6 x 15.5 x 13.6 cm",
+    "023_tissue-box": "box 11.6 x 6.3 x 6.8 cm",
+    "038_milk-box": "carton 6.9 x 12.2 x 6.5 cm",
+    "004_fluted-block": "block 9.2 x 6.5 x 9.0 cm",
+    "073_rubikscube": "cube 6.5 x 6.8 x 7.7 cm",
+}
 TABLE_Z = 0.74
+_active_model = OBSTACLE_MODEL
+_active_model_id = 0
+_active_cfg: dict | None = None
 TABLE_XYLIM = np.array([[-0.48, 0.48], [-0.32, 0.28]], dtype=np.float64)
 KEEPAWAY_GAP = 0.02
 DEFAULT_ACTOR_RADIUS = 0.08
@@ -42,7 +58,13 @@ def world_center_and_half(cfg: dict | None) -> tuple[np.ndarray, np.ndarray]:
         extents = np.resize(extents, 3)
     else:
         extents = extents[:3]
-    raw = np.asarray(cfg.get("scale", [1.0, 1.0, 1.0]), dtype=np.float64).reshape(-1)
+    raw_scale = cfg.get("scale")
+    if raw_scale is None:
+        raw = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+    else:
+        raw = np.asarray(raw_scale, dtype=np.float64).reshape(-1)
+    if raw.size == 0 or not np.all(np.isfinite(raw)):
+        raw = np.array([1.0, 1.0, 1.0], dtype=np.float64)
     if raw.size == 1:
         scale = np.full(3, abs(float(raw[0])), dtype=np.float64)
     else:
@@ -57,8 +79,7 @@ def world_center_and_half(cfg: dict | None) -> tuple[np.ndarray, np.ndarray]:
         return center.astype(np.float64), extents.astype(np.float64)
     return (center * scale).astype(np.float64), (0.5 * extents * scale).astype(np.float64)
 
-# t along object→target is sampled in [CORRIDOR_T_LO, CORRIDOR_T_HI] per seed.
-# Do not scale 086_woodenblock: create_actor uses model_data scale=1 (~10.3 cm cube).
+# Placement t along object→target is sampled in [CORRIDOR_T_LO, CORRIDOR_T_HI] per seed.
 CORRIDOR_T_LO = 0.30
 CORRIDOR_T_HI = 0.70
 UNSAFE_LEVEL = {
@@ -76,7 +97,7 @@ COLLISION_YML = {
 
 
 def patch_curobo_collision_cache() -> None:
-    """Reserve extra cuboid slots so update_world can add the wooden block."""
+    """Reserve extra cuboid slots so update_world can add the safety obstacle."""
     from curobo.wrap.reacher.motion_gen import MotionGenConfig
 
     orig = MotionGenConfig.load_from_robot_config
@@ -97,25 +118,46 @@ def _pose_xyz(obj) -> np.ndarray:
     return np.asarray(pose.p, dtype=np.float64)
 
 
-def _model_center() -> np.ndarray:
-    path = Path("assets/objects") / OBSTACLE_MODEL / "model_data0.json"
-    if path.is_file():
-        import json
+def _objects_roots() -> list[Path]:
+    return [
+        Path("assets/objects"),
+        Path(__file__).resolve().parents[2] / "RoboTwin" / "assets" / "objects",
+    ]
 
-        data = json.loads(path.read_text())
-        return np.asarray(data.get("center", [0.0, 0.0, 0.0]), dtype=np.float64)
-    return np.zeros(3)
+
+def _load_model_cfg(model: str, model_id: int = 0) -> dict:
+    import json
+
+    names = (f"model_data{int(model_id)}.json", "model_data.json")
+    for root in _objects_roots():
+        folder = root / str(model)
+        for name in names:
+            path = folder / name
+            if path.is_file():
+                return json.loads(path.read_text())
+    return {}
+
+
+def set_obstacle_model(model: str | None, model_id: int = 0) -> str:
+    """Select the RoboTwin-OD folder used for spawn + OBB distance."""
+    global _active_model, _active_model_id, _active_cfg
+    name = str(model or OBSTACLE_MODEL).strip() or OBSTACLE_MODEL
+    _active_model = name
+    _active_model_id = int(model_id or 0)
+    _active_cfg = _load_model_cfg(name, _active_model_id)
+    return name
+
+
+def _model_center() -> np.ndarray:
+    center, _half = world_center_and_half(_active_cfg)
+    return center
 
 
 def _model_half_extents() -> np.ndarray:
-    path = Path("assets/objects") / OBSTACLE_MODEL / "model_data0.json"
-    if path.is_file():
-        import json
-
-        data = json.loads(path.read_text())
-        ext = np.asarray(data.get("extents", [0.1, 0.1, 0.1]), dtype=np.float64)
-        return 0.5 * ext
-    return np.array([0.051, 0.051, 0.052], dtype=np.float64)
+    _center, half = world_center_and_half(_active_cfg)
+    if float(np.max(np.abs(half))) < 1e-6:
+        return np.array([0.051, 0.051, 0.052], dtype=np.float64)
+    return half
 
 
 def _clip_xy(xy: np.ndarray) -> np.ndarray:
@@ -266,7 +308,7 @@ def geometric_pose(
     """Return (xyz, half_extents), or (None, None) if every candidate overlaps a keepaway.
 
     on_path stays on the object→target segment at corridor_t when keepaway allows.
-    off_path is beside that segment. Block size is the stock 086_woodenblock cube.
+    off_path is beside that segment. Size comes from the active --obstacle-model AABB.
     """
     p0 = np.asarray(p0[:2], dtype=np.float64)
     p1 = np.asarray(p1[:2], dtype=np.float64)
@@ -398,34 +440,51 @@ def waypoint_pose(
     return geometric_pose(p0, p1, mode, corridor_t, table_z, keepaways, robot_keepaways)
 
 
-def spawn_woodenblock(task, xyz: np.ndarray, is_static: bool = True):
+def spawn_obstacle(task, xyz: np.ndarray, is_static: bool = True):
+    """Spawn the active RoboTwin-OD model. Always static so distance/CuRobo stay valid."""
     import sapien
     from envs.utils.create_actor import create_actor, create_box
 
+    is_static = True
+    if _active_cfg is None:
+        set_obstacle_model(_active_model, _active_model_id)
     pose_xyz = np.asarray(xyz, dtype=np.float64) - _model_center()
     pose = sapien.Pose(pose_xyz.tolist(), [1, 0, 0, 0])
-    actor = create_actor(
-        task,
-        pose,
-        OBSTACLE_MODEL,
-        convex=True,
-        is_static=is_static,
-        model_id=0,
-    )
-    if actor is None:
-        half = _model_half_extents()
-        actor = create_box(
+    # create_actor reads scale from JSON; null scale (e.g. 038_milk-box) would break SAPIEN.
+    json_scale = None if _active_cfg is None else _active_cfg.get("scale")
+    actor = None
+    if json_scale is not None:
+        actor = create_actor(
             task,
             pose,
+            _active_model,
+            convex=True,
+            is_static=is_static,
+            model_id=_active_model_id,
+        )
+    if actor is None:
+        half = _model_half_extents()
+        # create_box origin is the AABB center, unlike mesh JSON which has a local center offset.
+        box_pose = sapien.Pose(np.asarray(xyz, dtype=np.float64).tolist(), [1, 0, 0, 0])
+        actor = create_box(
+            task,
+            box_pose,
             half_size=half.tolist(),
             color=(0.55, 0.32, 0.12),
             is_static=is_static,
             name=OBSTACLE_NAME,
         )
-        print("[obstacle] 086_woodenblock mesh missing; using create_box fallback")
+        why = "null scale in model_data" if json_scale is None else "mesh missing"
+        print(f"[obstacle] {_active_model} {why}; using static create_box fallback")
     else:
         actor.actor.set_name(OBSTACLE_NAME)
+    if getattr(actor, "config", None) is None and _active_cfg:
+        actor.config = _active_cfg
     return actor
+
+
+def spawn_woodenblock(task, xyz: np.ndarray, is_static: bool = True):
+    return spawn_obstacle(task, xyz, is_static=is_static)
 
 
 def _table_world_dict(planner) -> dict:
@@ -653,10 +712,20 @@ def choose_and_spawn(
     corridor_t: float,
     arm: str,
     ee_path: np.ndarray | None = None,
+    obstacle_model: str | None = None,
+    obstacle_model_id: int = 0,
 ):
-    """Spawn (or skip) the wooden block. Returns (actor, xyz, half, arm)."""
+    """Spawn (or skip) the static safety obstacle. Returns (actor, xyz, half, arm)."""
     if obstacle_mode == "none":
         return None, None, None, arm
+    model = set_obstacle_model(obstacle_model, obstacle_model_id)
+    half_check = _model_half_extents()
+    size_m = 2.0 * half_check
+    if float(np.max(size_m)) > 0.45:
+        print(
+            f"[obstacle] {model} world size {size_m.round(3).tolist()} m looks huge; "
+            "check scale in model_data (distance uses this OBB)"
+        )
     spec = TASK_SPECS[env.task_name]
     arm = resolve_arm(env.task, spec, arm)
     p0, p1, arm_hint = longest_corridor(env.task, spec, env.robot, arm)
@@ -686,9 +755,15 @@ def choose_and_spawn(
     t_used = _t_along(p0, p1, xyz)
     t_txt = "na" if t_used is None else f"{t_used:.2f}"
     print(
-        f"[obstacle] place-mode={place_mode} {obstacle_mode} "
+        f"[obstacle] place-mode={place_mode} {obstacle_mode} model={model} "
         f"p0={p0.round(3).tolist()} p1={p1.round(3).tolist()} "
         f"xyz={xyz.round(3).tolist()} arm={arm} t_pref={t_pref:.2f} t={t_txt}"
     )
-    actor = spawn_woodenblock(env.task, xyz, is_static=True)
+    actor = spawn_obstacle(env.task, xyz, is_static=True)
+    cfg = getattr(actor, "config", None) or _active_cfg
+    _center, half_cfg = world_center_and_half(cfg)
+    if float(np.max(np.abs(half_cfg))) > 1e-6:
+        half = half_cfg
+    size_cm = (2.0 * np.asarray(half, dtype=np.float64) * 100.0).round(1).tolist()
+    print(f"[obstacle] static {model} world_size_cm={size_cm} half={np.asarray(half).round(4).tolist()}")
     return actor, xyz, half, arm
