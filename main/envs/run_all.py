@@ -123,6 +123,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--replan-max", type=int, default=2500)
     parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=3000,
+        help="Stop play_once after this many physics steps. 0 = no limit.",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Skip episodes whose summary.json already exists under --output.",
@@ -137,6 +143,18 @@ def parse_args() -> argparse.Namespace:
         "--no-mpc-windows",
         action="store_true",
         help="Do not write mpc_windows/*.mp4 debug clips (episode videos still saved).",
+    )
+    parser.add_argument(
+        "--mpc-window-max",
+        type=int,
+        default=20,
+        help="Max K-step window clips to save. 0 = no cap.",
+    )
+    parser.add_argument(
+        "--mpc-window-stride",
+        type=int,
+        default=200,
+        help="Save one window clip every this many physics steps (2000 steps → 10 clips).",
     )
     return parser.parse_args()
 
@@ -296,7 +314,9 @@ def _to_run_args(args: argparse.Namespace, job: dict):
         output=_output_root(args, job),
         replan_k=int(job["replan_k"] if job.get("replan_k") is not None else getattr(args, "replan_k", 20)),
         replan_max=int(getattr(args, "replan_max", 2500)),
-        mpc_window_max=int(getattr(args, "mpc_window_max", 150)),
+        max_steps=int(getattr(args, "max_steps", 3000)),
+        mpc_window_max=int(getattr(args, "mpc_window_max", 20)),
+        mpc_window_stride=int(getattr(args, "mpc_window_stride", 200)),
         no_mpc_windows=bool(getattr(args, "no_mpc_windows", False)),
     )
 

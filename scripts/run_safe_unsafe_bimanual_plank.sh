@@ -38,7 +38,7 @@
 
 set -euo pipefail
 ROOT="/storage1/fs1/sibai/Active/yuxuan/cross_embodiment/CEHJ"
-OUT_ROOT="${ROOT}/outputs/ihabnew/safe_unsafe_bimanual_plank_dont_save_frag"
+OUT_ROOT="${ROOT}/outputs/ihabnew/safe_unsafe_bimanual_plank"
 mkdir -p "${OUT_ROOT}/logs"
 
 export PYTHONNOUSERSITE=1
@@ -61,13 +61,16 @@ python "${ROOT}/main/run_all.py" \
   --obstacle-modes on_path \
   --place-mode geometric \
   --plan-mode ignore_obstacle \
-  --episodes 1 \
+  --episodes 5 \
   --base-seed 12 \
   --draw-bbox \
-  --no-mpc-windows \
+  --max-steps 3000 \
+  --mpc-window-max 5 \
+  --mpc-window-stride 200 \
+  # --no-mpc-windows \
   --resume \
   --controllers vanilla_play_once,plan_play_once_everyk \
-  --replan-ks 80,75,70,50,40 \
+  --replan-ks 80,75,70,50,40,30,20,10 \
   --output "${OUT_ROOT}" \
   "$@"
 

@@ -88,7 +88,13 @@ from .controller import (
 )
 from .env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE, Env
 from .obstacle import choose_and_spawn, update_curobo_world
-from .record import attach_recorder, detach_recorder, save_video, write_hold_trace
+from .record import (
+    EpisodeStepTimeout,
+    attach_recorder,
+    detach_recorder,
+    save_video,
+    write_hold_trace,
+)
 from .tasks import ALL_TASKS, resolve_arm, TASK_SPECS
 
 CONTROLLERS = {
@@ -140,13 +146,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mpc-window-max",
         type=int,
-        default=150,
+        default=20,
         help="Max K-step window clips to save (plan_play_once_everyk). 0 = no cap.",
+    )
+    parser.add_argument(
+        "--mpc-window-stride",
+        type=int,
+        default=200,
+        help="Save one window clip every this many physics steps (2000 steps → 10 clips).",
     )
     parser.add_argument(
         "--no-mpc-windows",
         action="store_true",
         help="Do not write mpc_windows/*.mp4 debug clips (episode videos still saved).",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=3000,
+        help="Stop play_once after this many physics steps. 0 = no limit.",
     )
     parser.add_argument(
         "--msaa",
@@ -326,10 +344,14 @@ def run_episode(args: argparse.Namespace) -> dict:
         ctrl.window_dir = out_dir / "mpc_windows"
         ctrl.window_draw_bbox = bool(args.draw_bbox)
         ctrl.window_fps = 1.0
-        ctrl.window_max = int(getattr(args, "mpc_window_max", 150))
+        ctrl.window_max = int(getattr(args, "mpc_window_max", 20))
+        ctrl.window_stride_steps = max(1, int(getattr(args, "mpc_window_stride", 200)))
+        n_at_2k = max(1, 2000 // ctrl.window_stride_steps)
         print(
             f"[run] MPC window clips → {ctrl.window_dir}  "
-            f"1 fps ({ctrl.k} steps ≈ {ctrl.k}s of playback)  max={ctrl.window_max}"
+            f"every {ctrl.window_stride_steps} steps  max={ctrl.window_max}  "
+            f"(2000 steps → {n_at_2k} clips)  "
+            f"1 fps ({ctrl.k} steps ≈ {ctrl.k}s of playback)"
         )
     elif args.controller == "plan_play_once_everyk":
         print("[run] MPC window clips disabled (--no-mpc-windows)")
@@ -346,12 +368,26 @@ def run_episode(args: argparse.Namespace) -> dict:
         "replan_k": replan_k,
         "clock": clock,
     }
-    rec = attach_recorder(env, streams, args.record_every, overlay, args.draw_bbox, clock=clock)
+    max_steps = int(getattr(args, "max_steps", 3000) or 0)
+    rec = attach_recorder(
+        env,
+        streams,
+        args.record_every,
+        overlay,
+        args.draw_bbox,
+        clock=clock,
+        max_steps=max_steps,
+    )
     play_error = None
+    timed_out = False
     clock.start()
     try:
         try:
             env.task.play_once()
+        except EpisodeStepTimeout as exc:
+            timed_out = True
+            play_error = str(exc)
+            print(f"play_once timeout: {exc}")
         except Exception as exc:
             play_error = str(exc)
             print(f"play_once failed: {exc}")
@@ -446,6 +482,8 @@ def run_episode(args: argparse.Namespace) -> dict:
         "held_right": held_right[-1] if held_right else None,
         "contact": any_contact,
         "play_error": play_error,
+        "timed_out": timed_out,
+        "max_steps": max_steps if max_steps > 0 else None,
         "obstacle_xyz": None if xyz is None else xyz.tolist(),
         "videos": outputs,
         "hold_trace": hold_trace,

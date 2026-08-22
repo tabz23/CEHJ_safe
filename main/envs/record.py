@@ -19,6 +19,10 @@ from .distance import (
 from .env import RECORD_SIZE
 
 
+class EpisodeStepTimeout(Exception):
+    """Raised from the recorder when play_once exceeds --max-steps."""
+
+
 def observer_rgb(task) -> np.ndarray:
     cam = task.cameras.observer_camera
     cam.take_picture()
@@ -331,6 +335,7 @@ def attach_recorder(
     overlay: dict,
     draw_bbox: bool,
     clock=None,
+    max_steps: int = 0,
 ):
     state = {
         "n": 0,
@@ -357,6 +362,13 @@ def attach_recorder(
     def step():
         orig_step()
         state["n"] += 1
+        if max_steps > 0 and state["n"] >= int(max_steps):
+            env.task.plan_success = False
+            env.task._cehj_step_timeout = True
+            if not state.get("timeout_logged"):
+                print(f"[record] episode timeout at {state['n']} steps (max={int(max_steps)})")
+                state["timeout_logged"] = True
+            raise EpisodeStepTimeout(f"episode hit max_steps={int(max_steps)}")
         recorded = state["n"] % max(record_every, 1) == 0
         try:
             if clock is not None:

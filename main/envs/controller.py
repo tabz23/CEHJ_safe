@@ -702,9 +702,14 @@ class PlanEveryKController(ResidualController):
         self.window_dir: Path | None = None
         self.window_draw_bbox = False
         self.window_fps = 1.0
-        self.window_max = 400
+        self.window_max = 20
+        # 2000 physics steps → 10 clips; cap at window_max.
+        self.window_stride_steps = 200
         self._window_i = 0
         self._window_frames: list = []
+        self._steps_played = 0
+        self._next_clip_at = 0
+        self._window_cap_logged = False
 
     def attach(self) -> None:
         super().attach()
@@ -792,8 +797,19 @@ class PlanEveryKController(ResidualController):
         )
         return tagged
 
+    def _should_record_window(self) -> bool:
+        """Save ~1 clip per ``window_stride_steps`` (2000 steps → 10 clips), cap at ``window_max``."""
+        if self.window_dir is None:
+            return False
+        if self.window_max > 0 and self._window_i >= self.window_max:
+            if not self._window_cap_logged:
+                print(f"[mpc] window clips capped at {self.window_max}")
+                self._window_cap_logged = True
+            return False
+        return int(self._steps_played) >= int(self._next_clip_at)
+
     def _play_seq(self, task, left_arm, right_arm, left_g, right_g, n_chunk: int, grip_i: int) -> None:
-        record = self.window_dir is not None and (left_arm is not None or right_arm is not None)
+        record = self._should_record_window() and (left_arm is not None or right_arm is not None)
         frames: list = []
         for i in range(int(n_chunk)):
             if left_arm is not None and i < _n_wp(left_arm):
@@ -833,18 +849,19 @@ class PlanEveryKController(ResidualController):
             _finish_open_arm(self, "left", n_exec=min(int(n_chunk), _n_wp(left_arm)))
         if right_arm is not None:
             _finish_open_arm(self, "right", n_exec=min(int(n_chunk), _n_wp(right_arm)))
+        self._steps_played += int(n_chunk)
         if record:
             self._save_window_clip(frames, n_chunk)
+            self._next_clip_at += max(1, int(self.window_stride_steps))
 
     def _save_window_clip(self, frames: list, n_chunk: int) -> None:
-        self._window_i += 1
         if not frames or self.window_dir is None:
             return
-        if self.window_max > 0 and self._window_i > self.window_max:
-            if self._window_i == self.window_max + 1:
-                print(f"[mpc] window clips capped at {self.window_max}")
-            return
-        path = self.window_dir / f"w{self._window_i:04d}_k{self.k}_n{int(n_chunk)}.mp4"
+        self._window_i += 1
+        path = (
+            self.window_dir
+            / f"w{self._window_i:04d}_step{self._steps_played}_k{self.k}_n{int(n_chunk)}.mp4"
+        )
         t0 = time.perf_counter()
         try:
             save_video(frames, path, self.window_fps)
