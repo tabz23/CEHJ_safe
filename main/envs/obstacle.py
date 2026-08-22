@@ -35,7 +35,16 @@ OBSTACLE_PRESETS = {
     "004_fluted-block": "block 9.2 x 6.5 x 9.0 cm",
     "073_rubikscube": "cube 6.5 x 6.8 x 7.7 cm",
 }
+# All listed RoboTwin-OD meshes rest with AABB center along Y. Map that to table Z.
+OBSTACLE_UP_AXIS = {name: 1 for name in OBSTACLE_PRESETS}
 TABLE_Z = 0.74
+# RoboTwin-OD meshes are Y-up. SAPIEN table is Z-up. Same quat as 071_can
+# in place_cans_plasticbox: model (x,y,z) → world (z,x,y).
+OBSTACLE_STAND_QUAT = (0.5, 0.5, 0.5, 0.5)
+_STAND_R = np.array(
+    [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+    dtype=np.float64,
+)
 _active_model = OBSTACLE_MODEL
 _active_model_id = 0
 _active_cfg: dict | None = None
@@ -158,6 +167,36 @@ def _model_half_extents() -> np.ndarray:
     if float(np.max(np.abs(half))) < 1e-6:
         return np.array([0.051, 0.051, 0.052], dtype=np.float64)
     return half
+
+
+def _up_axis() -> int:
+    """Model-frame axis that should point at the table normal (world Z)."""
+    if _active_model in OBSTACLE_UP_AXIS:
+        return int(OBSTACLE_UP_AXIS[_active_model])
+    center = _model_center()
+    if float(np.max(np.abs(center))) >= 1e-3:
+        return int(np.argmax(np.abs(center)))
+    return int(np.argmax(_model_half_extents()))
+
+
+def _stand_R_quat() -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    """Map the mesh up-axis onto world Z. Identity if the mesh is already Z-up."""
+    up = _up_axis()
+    if up == 1:
+        return _STAND_R, OBSTACLE_STAND_QUAT
+    if up == 0:
+        r = np.array(
+            [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+            dtype=np.float64,
+        )
+        return r, (0.7071067811865476, 0.0, 0.7071067811865476, 0.0)
+    return np.eye(3, dtype=np.float64), (1.0, 0.0, 0.0, 0.0)
+
+
+def _world_half_extents() -> np.ndarray:
+    """AABB half-extents after standing the mesh on the Z-up table."""
+    r, _quat = _stand_R_quat()
+    return np.abs(r) @ _model_half_extents()
 
 
 def _clip_xy(xy: np.ndarray) -> np.ndarray:
@@ -319,7 +358,7 @@ def geometric_pose(
         delta = np.array([0.0, -0.12], dtype=np.float64)
         dist = 0.12
     perp = np.array([-delta[1], delta[0]], dtype=np.float64) / dist
-    half = _model_half_extents()
+    half = _world_half_extents()
     block_r = float(np.max(half[:2]))
     t0, t_lo, t_hi = _t_bounds(p0, p1, dist, keepaways, block_r, float(corridor_t))
     t_tries: list[float] = [t0]
@@ -432,7 +471,7 @@ def waypoint_pose(
         perp = np.array([-tangent[1], tangent[0]], dtype=np.float64) / nrm
         signs = _perp_signs(np.asarray(p0[:2], dtype=np.float64), tangent, perp, robot_keepaways or [])
         xy = xy + signs[0] * 0.22 * perp
-    half = _model_half_extents()
+    half = _world_half_extents()
     block_r = float(np.max(half[:2]))
     if _in_table(xy, block_r) and _keepaway_ok(xy, keepaways, block_r):
         return _pack_xyz(xy, table_z, half), half
@@ -448,8 +487,9 @@ def spawn_obstacle(task, xyz: np.ndarray, is_static: bool = True):
     is_static = True
     if _active_cfg is None:
         set_obstacle_model(_active_model, _active_model_id)
-    pose_xyz = np.asarray(xyz, dtype=np.float64) - _model_center()
-    pose = sapien.Pose(pose_xyz.tolist(), [1, 0, 0, 0])
+    r, quat = _stand_R_quat()
+    pose_xyz = np.asarray(xyz, dtype=np.float64) - (r @ _model_center())
+    pose = sapien.Pose(pose_xyz.tolist(), list(quat))
     # create_actor reads scale from JSON; null scale (e.g. 038_milk-box) would break SAPIEN.
     json_scale = None if _active_cfg is None else _active_cfg.get("scale")
     actor = None
@@ -463,7 +503,7 @@ def spawn_obstacle(task, xyz: np.ndarray, is_static: bool = True):
             model_id=_active_model_id,
         )
     if actor is None:
-        half = _model_half_extents()
+        half = _world_half_extents()
         # create_box origin is the AABB center, unlike mesh JSON which has a local center offset.
         box_pose = sapien.Pose(np.asarray(xyz, dtype=np.float64).tolist(), [1, 0, 0, 0])
         actor = create_box(
@@ -719,7 +759,7 @@ def choose_and_spawn(
     if obstacle_mode == "none":
         return None, None, None, arm
     model = set_obstacle_model(obstacle_model, obstacle_model_id)
-    half_check = _model_half_extents()
+    half_check = _world_half_extents()
     size_m = 2.0 * half_check
     if float(np.max(size_m)) > 0.45:
         print(
@@ -764,6 +804,10 @@ def choose_and_spawn(
     _center, half_cfg = world_center_and_half(cfg)
     if float(np.max(np.abs(half_cfg))) > 1e-6:
         half = half_cfg
-    size_cm = (2.0 * np.asarray(half, dtype=np.float64) * 100.0).round(1).tolist()
-    print(f"[obstacle] static {model} world_size_cm={size_cm} half={np.asarray(half).round(4).tolist()}")
+    size_cm = (2.0 * _world_half_extents() * 100.0).round(1).tolist()
+    up = "XYZ"[_up_axis()]
+    print(
+        f"[obstacle] static upright {model} up={up} world_size_cm={size_cm} "
+        f"half={np.asarray(half).round(4).tolist()}"
+    )
     return actor, xyz, half, arm
