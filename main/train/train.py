@@ -38,7 +38,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-os.environ.setdefault("WANDB_MODE", "offline")
+# offline by default; online when the user provides WANDB_API_KEY
+if not os.environ.get("WANDB_API_KEY"):
+    os.environ.setdefault("WANDB_MODE", "offline")
 
 if __package__ in (None, ""):
     import sys
@@ -48,16 +50,11 @@ if __package__ in (None, ""):
     __package__ = "main.train"
 CEHJ_ROOT = Path(__file__).resolve().parents[2]
 
-from main.network.body_features import BodyTokenExtractor  # noqa: E402
 from main.train.buffer import StepBuffer  # noqa: E402
-from main.train.collect import CKPT_DIR, make_kinematics  # noqa: E402
+from main.train.collect import CKPT_DIR  # noqa: E402
 from main.train.config import FrozenConfig  # noqa: E402
 from main.network.encoder import HoloBrainEncoder, RobotInjection  # noqa: E402
-from main.envs.env import Env  # noqa: E402
-from main.train.filter import SafetyFilter  # noqa: E402
 from main.network.heads import PolicyEncoder, TokenActor, TwinCritic  # noqa: E402
-from main.train.hfunc import compute_h  # noqa: E402
-from main.train.nominal import NominalTracker  # noqa: E402
 from main.network.trunk import GeometricTrunk  # noqa: E402
 
 
@@ -68,7 +65,9 @@ def _t(x, dtype=torch.float32):
 class Trainer:
     def __init__(self, cfg: FrozenConfig, data_root: Path, run_dir: Path):
         self.cfg = cfg
-        self.run_dir = Path(run_dir)
+        # resolve NOW: RoboTwin chdirs during env creation; a relative run
+        # dir would scatter checkpoint/eval files under the RoboTwin root
+        self.run_dir = Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         cfg.save(self.run_dir / "config.json")
 
@@ -79,8 +78,11 @@ class Trainer:
         self.trunk = GeometricTrunk().cuda()
         self.policy_enc = PolicyEncoder(self.injection, self.trunk).cuda()
         self.actor = TokenActor().cuda()
-        self.critics = TwinCritic(temperature=cfg.softmin_T).cuda()
-        self.critics_targ = TwinCritic(temperature=cfg.softmin_T).cuda()
+        # V lives in h*h_scale units; T is physical metres in the config, so
+        # scale it to keep the softmin sharpness physically meaningful
+        T = cfg.softmin_T * float(getattr(cfg, "h_scale", 1.0))
+        self.critics = TwinCritic(temperature=T).cuda()
+        self.critics_targ = TwinCritic(temperature=T).cuda()
         self.critics_targ.load_state_dict(self.critics.state_dict())
         # target ENCODER too: Polyak covers nothing if enc_n comes from the
         # live trunk/injection — the bootstrap target would move every step
@@ -109,14 +111,10 @@ class Trainer:
             lr=cfg.lr,
         )
 
-        # one env, never stepped: Jacobian recompute from stored qpos
-        self._jac_env = Env(cfg.task, cfg.embodiment, seed=0, control_freq=20.0)
-        self.extractor = BodyTokenExtractor(self._jac_env)
-        self.dtheta_max = torch.from_numpy(extractor_delta(self.extractor)).cuda()
         # eval encoder built once (safetensors load + Swin init per eval
-        # otherwise)
+        # otherwise). Jlin/Jang/dtheta_max come from the buffer (stored per
+        # step — a mixed-embodiment buffer cannot recompute them).
         self._eval_encoder = HoloBrainEncoder(str(CKPT_DIR), device="cuda")
-        self._eval_kin = make_kinematics(CKPT_DIR)
         self.rng = np.random.RandomState(0)
         self.step = 0
 
@@ -138,8 +136,10 @@ class Trainer:
             _t(g("body_mask")).bool(), _t(g("joint_index"), torch.int64),
             _t(g("scene_tokens")), _t(g("scene_pos")),
         )
-        Jlin, Jang = self.extractor.jacobian_batch(_t(g("qpos_raw")))
-        return enc, Jlin.cuda(), Jang.cuda(), _t(g("joint_index"), torch.int64)
+        # stored per-step (mixed embodiments cannot recompute from qpos)
+        Jlin = _t(g("Jlin"))
+        Jang = _t(g("Jang"))
+        return enc, Jlin, Jang, _t(g("joint_index"), torch.int64)
 
     def grad_step(self) -> dict:
         cfg = self.cfg
@@ -148,10 +148,12 @@ class Trainer:
         enc_n, Jlin_n, Jang_n, ji_n = self._encode(b, "_next", target=True)
         h = _t(b["h"])                                    # [B]
         dtheta = _t(b["dtheta"])                          # executed action
+        dtheta_max = _t(b["dtheta_max"])                  # per-sample, padded
+        dtheta_max_n = _t(b["dtheta_max_next"])
         gamma, alpha = self.gamma(), self.alpha()
 
         with torch.no_grad():
-            a_n, logp_n, _ = self.actor(enc_n.body, ji_n, self.dtheta_max)
+            a_n, logp_n, _ = self.actor(enc_n.body, ji_n, dtheta_max_n)
             q1_t, q2_t, _, _ = self.critics_targ(enc_n, a_n, Jlin_n, Jang_n, ji_n)
             q_next = torch.minimum(q1_t, q2_t)
             target = (1 - gamma) * h + gamma * torch.minimum(h, q_next)
@@ -180,7 +182,7 @@ class Trainer:
             enc.body.detach(), enc.pos.detach(), enc.mask,
             enc.scene.detach(), enc.scene_pos.detach(), enc.scene_mask,
         )
-        a_pi, logp, n_act = self.actor(enc_det.body, ji, self.dtheta_max)
+        a_pi, logp, n_act = self.actor(enc_det.body, ji, dtheta_max)
         q1_pi, q2_pi, _, _ = self.critics(enc_det, a_pi, Jlin, Jang, ji)
         loss_pi = (-torch.minimum(q1_pi, q2_pi) + alpha * logp).mean()
         self.opt_a.zero_grad(set_to_none=True)
@@ -214,28 +216,33 @@ class Trainer:
     # NOTE: no global no_grad here — the eval probe runs cuRobo planning,
     # which needs autograd. run_eval_episode wraps model calls locally.
     def evaluate(self, wandb_run=None) -> dict:
-        """Nominal vs filtered episodes on a fixed seed; figure + video."""
+        """Eval = the filtered trajectory only (nominal + safety filter),
+        on a fresh random (task, embodiment, obstacle) scene per eval."""
         from main.train.eval_utils import run_eval_episode, save_eval_figure
 
-        cfg = self.cfg
-        encoder = self._eval_encoder
-        kin = self._eval_kin
-        seed = cfg.eval_seeds[0]
+        # a different scene per eval (deterministic sequence): fixed-seed
+        # evals made every video identical, hiding placement sensitivity
+        n_evals = getattr(self, "_n_evals", 0)
+        self._n_evals = n_evals + 1
         metrics = {}
-        for mode in ("nominal", "filtered"):
+        for mode in ("filtered",):
             trace = run_eval_episode(
-                cfg, seed, mode, encoder, kin, self.policy_enc, self.actor,
-                self.critics,
+                self.cfg, n_evals, mode, self._eval_encoder, self.policy_enc,
+                self.actor, self.critics, tag=f"_step{self.step}",
             )
             metrics[mode] = trace["metrics"]
             fig_path = save_eval_figure(trace, self.run_dir / "eval", mode, self.step)
             if wandb_run is not None:
                 import wandb
 
-                wandb_run.log(
-                    {f"eval/{mode}_hv_fig": wandb.Image(str(fig_path))},
-                    step=self.step,
-                )
+                logs = {f"eval/{mode}_hv_fig": wandb.Image(str(fig_path))}
+                # panel video (observer + white stats panel) — the filtered
+                # trajectory is the nominal controller + safety filter
+                if trace.get("video_path"):
+                    logs[f"eval/{mode}_video"] = wandb.Video(
+                        trace["video_path"], fps=5, format="mp4"
+                    )
+                wandb_run.log(logs, step=self.step)
         if wandb_run is not None:
             import wandb
 
@@ -247,18 +254,18 @@ class Trainer:
         return metrics
 
 
-def extractor_delta(extractor) -> np.ndarray:
-    return extractor.delta_theta_max.astype(np.float32)
-
-
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--data", type=Path, default=CEHJ_ROOT / "data" / "smoke")
     p.add_argument("--run", type=Path, default=CEHJ_ROOT / "runs" / "smoke")
-    p.add_argument("--grad-steps", type=int, default=300)
-    p.add_argument("--eval-every", type=int, default=150)
+    p.add_argument("--grad-steps", type=int, default=204800,
+                   help="200 epochs x 1024 by default")
+    p.add_argument("--eval-every", type=int, default=1024,
+                   help="grad steps per epoch (test runs: 50)")
     p.add_argument("--no-wandb", action="store_true")
     args = p.parse_args()
+    args.data = args.data.resolve()
+    args.run = args.run.resolve()  # RoboTwin chdirs during env creation
 
     cfg = FrozenConfig.load(args.data / "config.json")
     cfg.grad_steps = args.grad_steps
@@ -301,7 +308,6 @@ def main() -> None:
     trainer.evaluate(run)
     if run is not None:
         run.finish()
-    trainer._jac_env.close()
     print("TRAIN DONE")
 
 

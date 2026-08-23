@@ -2,20 +2,23 @@
 
 Per-step fields (~630 KB/step, dominated by fp16 scene tokens). Stored per
 step: scene_tokens, scene_pos, state_tokens, body_tokens, link_pos, qpos
-(policy layout, 14), qpos_raw (per-arm raw 8+8, for exact Jacobian
-recompute), dtheta, h, per_link_h, d_arm_arm, body_mask, joint_index,
+(policy layout), qpos_raw (per-arm raw joints), dtheta, h, per_link_h,
+d_arm_arm, body_mask, joint_index, Jlin/Jang, dtheta_max, embodiment_id,
 episode_id, done — with episode_id and done written from step zero, so
 sampling s' across an episode boundary is rejected at sample time.
 
-Header (JSON, once): l_reach, joint_vel_limits, link_names, kappa,
-control_dt, T, embodiment, urdf_hash, field shapes — without these the
+CROSS-EMBODIMENT: the buffer mixes embodiments, so variable-width fields
+are ZERO-PADDED to fixed maxima at append time (validity via body_mask /
+joint_index): state_tokens [16, 256] (14 for 6-dof arms), qpos [16],
+qpos_raw/dtheta/dtheta_max [18] (16 for 6-dof arms), Jlin/Jang [20, 3, 18].
+Jlin/Jang/dtheta_max are STORED (not recomputed at sample time) because the
+recompute would need the right embodiment's URDF per sample.
+
+Header (JSON, once): config dict incl. h_scale, softmin_T, dt, the
+task/embodiment/obstacle choice lists, field shapes — without these the
 stored values are uninterpretable later. Reopening reads capacity from the
 header; a fresh buffer requires an explicit capacity (an invented capacity
 would try to allocate petabytes).
-
-Not stored: Jlin/Jang (recomputed from qpos_raw via
-BodyTokenExtractor.jacobian_batch — sub-ms batched, and a URDF fix does
-not invalidate the buffer), dtheta_max, T_cam_world.
 """
 
 from __future__ import annotations
@@ -25,21 +28,29 @@ from pathlib import Path
 
 import numpy as np
 
+# cross-embodiment maxima (6-dof arms: 14/16 wide; franka 7-dof: 16/18)
+MAX_STATE_TOKENS = 16
+MAX_ACTION = 18
+
 # name -> (dtype, per-step shape)
 FIELDS = {
     "scene_tokens": (np.float16, (1200, 256)),
     "scene_pos": (np.float32, (1200, 3)),
-    "state_tokens": (np.float16, (14, 256)),
+    "state_tokens": (np.float16, (MAX_STATE_TOKENS, 256)),
     "body_tokens": (np.float32, (20, 16)),
     "link_pos": (np.float32, (20, 3)),
-    "qpos": (np.float32, (14,)),
-    "qpos_raw": (np.float32, (16,)),
-    "dtheta": (np.float32, (16,)),
+    "Jlin": (np.float16, (20, 3, MAX_ACTION)),
+    "Jang": (np.float16, (20, 3, MAX_ACTION)),
+    "qpos": (np.float32, (16,)),
+    "qpos_raw": (np.float32, (MAX_ACTION,)),
+    "dtheta": (np.float32, (MAX_ACTION,)),
+    "dtheta_max": (np.float32, (MAX_ACTION,)),
     "h": (np.float32, ()),
     "per_link_h": (np.float32, (20,)),
     "d_arm_arm": (np.float32, ()),
     "body_mask": (np.bool_, (20,)),
     "joint_index": (np.int8, (20,)),
+    "embodiment_id": (np.int8, ()),
     "episode_id": (np.int32, ()),
     "done": (np.bool_, ()),
 }
@@ -48,7 +59,8 @@ FIELDS = {
 # splitting avoids reading every field twice (the throughput ceiling).
 NEXT_FIELDS = (
     "state_tokens", "body_tokens", "link_pos", "body_mask",
-    "joint_index", "scene_tokens", "scene_pos", "qpos_raw",
+    "joint_index", "scene_tokens", "scene_pos",
+    "Jlin", "Jang", "dtheta_max",
 )
 CUR_FIELDS = NEXT_FIELDS + ("h", "dtheta")
 
@@ -56,7 +68,9 @@ CUR_FIELDS = NEXT_FIELDS + ("h", "dtheta")
 class StepBuffer:
     def __init__(self, root: str | Path, capacity: int | None = None,
                  header: dict | None = None):
-        self.root = Path(root)
+        # resolve NOW: RoboTwin chdirs during env setup, so a relative root
+        # would silently point somewhere else by the first append
+        self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         header_path = self.root / "header.json"
         if header is not None:
@@ -75,22 +89,49 @@ class StepBuffer:
                 )
         self.capacity = int(capacity)
         self.arrays = {}
+        # arrays are created lazily on first append with the shapes the
+        # pipeline actually produces (scene token count follows camera
+        # resolution / feature_level — never hardcode it)
         for name, (dtype, shape) in FIELDS.items():
             p = self.root / f"{name}.npy"
             if p.exists():
-                arr = np.load(p, mmap_mode="r+")
-            else:
-                arr = np.lib.format.open_memmap(
-                    p, mode="w+", dtype=dtype, shape=(self.capacity, *shape)
-                )
-            self.arrays[name] = arr
+                self.arrays[name] = np.load(p, mmap_mode="r+")
+        if self.arrays:
+            self._shapes = {n: a.shape[1:] for n, a in self.arrays.items()}
+        else:
+            self._shapes = dict(self.header.get("shapes", {}))
         self.n = int(self.header.get("n", 0))
         self._valid_t: np.ndarray | None = None
 
+    def _create(self, name: str, value: np.ndarray) -> np.ndarray:
+        dtype = FIELDS[name][0]
+        arr = np.lib.format.open_memmap(
+            self.root / f"{name}.npy", mode="w+",
+            dtype=dtype, shape=(self.capacity, *value.shape),
+        )
+        self.arrays[name] = arr
+        self._shapes[name] = value.shape
+        self.header["shapes"] = {k: list(v) for k, v in self._shapes.items()}
+        return arr
+
     def append(self, step: dict) -> None:
         assert self.n < self.capacity, "buffer full"
-        for name, arr in self.arrays.items():
-            arr[self.n] = step[name]
+        for name, value in step.items():
+            value = np.asarray(value)
+            arr = self.arrays.get(name)
+            if arr is not None and tuple(arr.shape[1:]) != tuple(value.shape):
+                if self.n > 0:
+                    raise ValueError(
+                        f"{name}: shape changed {tuple(arr.shape[1:])} -> "
+                        f"{tuple(value.shape)} after {self.n} steps; refusing "
+                        f"to silently invalidate the buffer"
+                    )
+                print(f"[buffer] {name}: recreating with new shape {tuple(value.shape)}")
+                (self.root / f"{name}.npy").unlink()
+                arr = None
+            if arr is None:
+                arr = self._create(name, value)
+            arr[self.n] = value
         self.n += 1
         self.header["n"] = self.n
         self._valid_t = None  # invalidate the sample cache

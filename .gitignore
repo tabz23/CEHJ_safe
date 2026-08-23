@@ -24,3 +24,4 @@ venv/
 *.swp
 runs/
 nominal_cache/
+data/

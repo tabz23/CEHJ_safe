@@ -433,6 +433,10 @@ class Env:
         import numpy as np
         import torch
 
+        # CRITICAL with ray tracing: the RT renderer keeps its own copy of
+        # the scene — without this sync, take_picture renders a STALE state
+        # (obstacles spawned since the last sync are invisible, arm poses lag)
+        self.task._update_render()
         cams = self.task.cameras
         cam_list = [
             cams.static_camera_list[cams.head_camera_id],
@@ -473,33 +477,35 @@ class Env:
             "camera_names": ["head", "left_wrist", "right_wrist"],
         }
 
-    def step_dtheta(self, dtheta16, grip_left=None, grip_right=None) -> float:
-        """Apply a 16-dim per-joint DISPLACEMENT action (actor/critic layout
-        [L j1..j8, R j1..j8], prismatic slots ignored) and advance one
-        control step.
+    def step_dtheta(self, dtheta, grip_left=None, grip_right=None) -> float:
+        """Apply a per-joint DISPLACEMENT action (actor/critic layout
+        [L j1..jn, R j1..jn], n = arm joints + 2 prismatic slots per arm;
+        prismatic slots ignored) and advance one control step.
 
-        Bridges to step()'s absolute 14-dim targets:
-        a14 = [theta_L + dL, gripL, theta_R + dR, gripR]; grippers hold
-        their current opening unless grip_left/right are given (normalized
-        [0,1] absolute targets).
+        Bridges to step()'s absolute targets:
+        [theta_L + dL, gripL, theta_R + dR, gripR]; grippers hold their
+        current opening unless grip_left/right are given (normalized
+        [0,1] absolute targets). Embodiment-agnostic: arm joint counts
+        come from the robot's real joint states (piper 6, franka 7).
         """
         import numpy as np
 
-        d = np.asarray(dtheta16, dtype=np.float64).reshape(-1)
-        theta = np.array(
-            self.robot.get_left_arm_real_jointState()
-            + self.robot.get_right_arm_real_jointState(),
-            dtype=np.float64,
-        )
-        a14 = np.concatenate(
+        d = np.asarray(dtheta, dtype=np.float64).reshape(-1)
+        left = np.array(self.robot.get_left_arm_real_jointState(),
+                        dtype=np.float64)
+        right = np.array(self.robot.get_right_arm_real_jointState(),
+                         dtype=np.float64)
+        n_l, n_r = len(left) - 1, len(right) - 1  # gripper scalar is last
+        per_arm = d.shape[0] // 2
+        a = np.concatenate(
             [
-                theta[0:6] + d[0:6],
-                [theta[6] if grip_left is None else grip_left],
-                theta[7:13] + d[8:14],
-                [theta[13] if grip_right is None else grip_right],
+                left[:n_l] + d[:n_l],
+                [left[n_l] if grip_left is None else grip_left],
+                right[:n_r] + d[per_arm:per_arm + n_r],
+                [right[n_r] if grip_right is None else grip_right],
             ]
         )
-        return self.step(a14)
+        return self.step(a)
 
     def _physics_substeps(self) -> int:
         """Physics steps for one control step, exact on average (250/freq)."""
@@ -534,10 +540,11 @@ class Env:
         """Apply an action and advance one control step (1/control_freq s).
 
         Args:
-            action: optional 14-dim vector
-                [left_arm(6), left_gripper, right_arm(6), right_gripper],
-                gripper values normalized to [0, 1]. `None` holds the
-                current drive targets.
+            action: optional vector
+                [left_arm(n), left_gripper, right_arm(n), right_gripper],
+                n = arm joints per side (piper 6 -> 14-dim, franka 7 ->
+                16-dim), gripper values normalized to [0, 1]. `None` holds
+                the current drive targets.
 
         Returns:
             sim_time (seconds) after the step.
@@ -546,15 +553,17 @@ class Env:
 
         if action is not None:
             action = np.asarray(action, dtype=np.float64).reshape(-1)
-            if action.shape[0] != 14:
+            if action.shape[0] < 4 or action.shape[0] % 2 != 0:
                 raise ValueError(
-                    f"action must have 14 dims [L6, gripL, R6, gripR], got {action.shape}"
+                    f"action must have 2n+2 dims [Ln, gripL, Rn, gripR], "
+                    f"got {action.shape}"
                 )
-            zeros = np.zeros(6)
-            self.robot.set_arm_joints(action[0:6], zeros, "left")
-            self.robot.set_gripper(float(action[6]), "left")
-            self.robot.set_arm_joints(action[7:13], zeros, "right")
-            self.robot.set_gripper(float(action[13]), "right")
+            n = (action.shape[0] - 2) // 2
+            zeros = np.zeros(n)
+            self.robot.set_arm_joints(action[0:n], zeros, "left")
+            self.robot.set_gripper(float(action[n]), "left")
+            self.robot.set_arm_joints(action[n + 1:n + 1 + n], zeros, "right")
+            self.robot.set_gripper(float(action[2 * n + 1]), "right")
         n = self._physics_substeps()
         for _ in range(n):
             self.task.scene.step()

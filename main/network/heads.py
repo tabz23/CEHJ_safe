@@ -220,11 +220,15 @@ class TwinCritic(nn.Module):
 
 
 class TokenActor(nn.Module):
-    """Per-token SAC actor head (shared weights, count-invariant)."""
+    """Per-token SAC actor head (shared weights, count-invariant).
 
-    def __init__(self, dim: int = 256, n_actions: int = 16):
+    The action width is NOT a constructor constant: it is read from
+    dtheta_max at forward time (the extractor produces dtheta_max and
+    joint_index consistently per embodiment — piper A=16, franka A=18).
+    """
+
+    def __init__(self, dim: int = 256, n_actions: int = None):
         super().__init__()
-        self.n_actions = n_actions
         self.head = nn.Linear(dim, 2)
 
     def forward(self, body, joint_index, dtheta_max, deterministic: bool = False):
@@ -259,8 +263,9 @@ class TokenActor(nn.Module):
         # where, not multiply: non-finite padded slots survive *0
         logp = torch.where(valid, logp_tok, torch.zeros_like(logp_tok)).sum(-1)
 
-        # scatter by joint_index (only valid entries; deterministic writes)
-        act = u.new_zeros(B, self.n_actions)
+        # scatter by joint_index (only valid entries; deterministic writes);
+        # width from dtheta_max — the embodiment's true action dimension
+        act = u.new_zeros(B, dtheta_max.shape[-1])
         bidx, tidx = valid.nonzero(as_tuple=True)
         act[bidx, joint_index[bidx, tidx]] = u[bidx, tidx]
 

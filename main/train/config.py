@@ -26,14 +26,30 @@ class FrozenConfig:
     gamma_anneal_steps: int = 50_000
     table_margin: float = 0.01          # table gets its own clearance margin (m)
     table_height: float = 0.74          # RoboTwin default table height (m); part of h's definition
+    h_scale: float = 20.0               # h/V are trained in h*h_scale units (h is ~mm-cm
+                                        # here; 20x better-conditioned targets). softmin_T
+                                        # and the filter margins below stay in PHYSICAL
+                                        # metres and are multiplied by h_scale at use.
     obstacle_mode: str = "on_path"      # safety obstacle spawn mode for collection
+    obstacle_t: float = 0.6             # corridor t for on_path spawns (unsafe level 2)
     h_include_payload: bool = True      # grasped object joins the body set after grasp
     encoder_variant: str = "HoloBrain_v0.0_GD"
     feature_level: tuple = (1, 2)
 
-    # collection
-    task: str = "place_empty_cup"
+    # collection — each episode samples a random (task, embodiment, obstacle)
+    # triple from the choices below (cross-embodiment training: no fixed scene)
+    task: str = "stack_blocks_two"
     embodiment: str = "piper"
+    obstacle_model: str = "086_woodenblock"
+    task_choices: tuple = (
+        "stack_blocks_two", "stack_bowls_two", "grab_roller",
+        "pick_dual_bottles", "place_bread_basket", "place_burger_fries",
+        "place_can_basket", "place_cans_plasticbox",
+    )
+    embodiment_choices: tuple = ("piper", "franka-panda", "ARX-X5", "ur5-wsg")
+    obstacle_choices: tuple = ("086_woodenblock", "059_pencup")
+    randomize_scenes: bool = True       # sample triples per episode/eval
+    replan_k: int = 60                  # PlanEveryKController window (physics steps); part of the nominal definition
     n_episodes: int = 25
     max_steps_per_episode: int = 400
     perturb_prob: float = 0.05          # random dtheta injection probability
@@ -46,13 +62,13 @@ class FrozenConfig:
     alpha_start: float = 0.2            # entropy temperature (annealed -> 0)
     alpha_final: float = 0.0
     alpha_anneal_steps: int = 20_000    # aggressive: unsafe-optimistic bonus
-    grad_steps: int = 300               # smoke default
-    eval_every: int = 150
+    grad_steps: int = 204800            # 200 epochs x 1024 (real training default)
+    eval_every: int = 1024              # one epoch = 1024 grad steps (test runs: 50)
     eval_seeds: tuple = (1000, 1001)
 
     # deployment filter
-    margin_on: float = 0.0              # engage filter below this V
-    margin_off: float = 0.02            # release above this V (hysteresis)
+    margin_on: float = 0.0              # engage filter below this V (physical m, scaled at use)
+    margin_off: float = 0.005           # release above this V (physical m; hysteresis)
 
     urdf_hash: str = ""                 # filled at run start
     version: int = 1

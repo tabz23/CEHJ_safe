@@ -16,128 +16,83 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import torch
 
 import sys
 
 CEHJ_ROOT = Path(__file__).resolve().parents[2]
 
-from main.network.body_features import BodyTokenExtractor  # noqa: E402
-from main.envs.env import Env  # noqa: E402
-from main.train.filter import SafetyFilter  # noqa: E402
-from main.train.hfunc import compute_h  # noqa: E402
-from main.train.nominal import NominalTracker  # noqa: E402
-from main.envs.obstacle import choose_and_spawn  # noqa: E402
 
+def run_eval_episode(cfg, eval_index, mode, encoder, policy_enc, actor, critics,
+                     record_video=True, tag=""):
+    """Run one eval episode ('filtered' — nominal + safety filter) on the
+    run.py controller stack (PlanEveryKController, k = cfg.replan_k) via
+    RolloutController; return trace dict.
 
-def run_eval_episode(cfg, seed, mode, encoder, kin, policy_enc, actor, critics,
-                     record_video=True):
-    """Run one eval episode ('nominal' or 'filtered'); return trace dict.
+    The (task, embodiment, obstacle) triple is sampled deterministically
+    from eval_index (rng seeded by eval_seeds[0] + eval_index), so every
+    eval is a fresh but reproducible scene — cross-embodiment, like
+    collection. The scene seed is the same eval seed.
 
-    Note: NOT globally no_grad — cuRobo planning (probe / nominal) needs
-    autograd. Model calls are wrapped in no_grad locally instead.
+    Note: NOT globally no_grad — cuRobo planning needs autograd. Model
+    calls are wrapped in no_grad locally inside RolloutController.
     """
-    probe_env = Env(cfg.task, cfg.embodiment, seed=seed, control_freq=20.0)
-    tracker = NominalTracker.cached(
-        CEHJ_ROOT / "nominal_cache" / f"{cfg.task}_{cfg.embodiment}_s{seed}",
-        probe_env, control_freq=20.0,
-    )
-    env = Env(cfg.task, cfg.embodiment, seed=seed, control_freq=20.0)
-    actor_ob, xyz, half, _ = choose_and_spawn(env, cfg.obstacle_mode, "geometric", 0.6, "auto")
-    env.obstacle, env.obstacle_xyz, env.obstacle_half = actor_ob, xyz, half
-    extractor = BodyTokenExtractor(env)
-    dtheta_max = extractor.delta_theta_max.astype(np.float32)
-    flt = SafetyFilter(
-        actor, critics,
-        body_joint_index(extractor).cuda(),
-        torch.from_numpy(dtheta_max).cuda(),
-        margin_on=cfg.margin_on, margin_off=cfg.margin_off,
-    )
+    from main.train.collect import CKPT_DIR, make_kinematics, sample_scene
+    from main.train.rollout import RolloutController
 
-    trace = {"t": [], "h": [], "V": [], "intervened": [], "dtheta_ratio": [],
-             "control": [], "frames": []}
-    T = min(tracker.T, cfg.max_steps_per_episode)
+    eval_seed = cfg.eval_seeds[0] + eval_index
+    rng = np.random.RandomState(eval_seed)
+    cfg_ep = sample_scene(cfg, rng) if getattr(cfg, "randomize_scenes", False) else cfg
+    kin = make_kinematics(CKPT_DIR, cfg_ep.embodiment)
+    print(f"[eval {eval_index}] {cfg_ep.embodiment} / {cfg_ep.task} / "
+          f"{cfg_ep.obstacle_model} seed={eval_seed}")
+
     video = None
+    vid_dir = CEHJ_ROOT / "runs" / "videos"
+    vid_name = (f"eval_{mode}_{cfg_ep.embodiment}_{cfg_ep.task}"
+                f"_s{eval_seed}{tag}.mp4")
     if record_video:
-        vid_dir = CEHJ_ROOT / "runs" / "videos"
         vid_dir.mkdir(parents=True, exist_ok=True)
-        video = PanelVideoWriter(vid_dir / f"eval_{mode}_s{seed}.mp4", fps=10.0)
-    for t in range(T):
-        obs = env.get_encoder_obs()
-        tokens, pos_mean, _ = encoder.encode_visual_tokens(
-            obs["imgs"], obs["depths"], obs["image_wh"], obs["projection_mat"]
-        )
-        state = encoder.encode_joint_angles(obs["joint_state"], kin).squeeze(2)
-        body = extractor.extract()
-
-        goal = tracker.goal(t)
-        theta = obs["joint_state"][0, 0].numpy()
-        dtheta = np.zeros(16, dtype=np.float64)
-        dtheta[0:6] = np.clip(goal[0:6] - theta[0:6], -dtheta_max[0:6], dtheta_max[0:6])
-        dtheta[8:14] = np.clip(goal[7:13] - theta[7:13], -dtheta_max[8:14], dtheta_max[8:14])
-        a_nom = torch.from_numpy(dtheta[None].astype(np.float32)).cuda()
-
-        with torch.no_grad():
-            enc = policy_enc(
-                state, body["body_tokens"][None], body["link_pos"][None],
-                body["body_mask"][None], body["joint_index"][None],
-                tokens, pos_mean,
-            )
-            Jlin = body["Jlin"][None]
-            Jang = body["Jang"][None]
-
-            if mode == "filtered":
-                action, V, intervened = flt.action(enc, Jlin, Jang, a_nom)
-            else:
-                dtheta_pi, _, _ = actor(enc.body, flt.joint_index, flt.dtheta_max,
-                                        deterministic=True)
-                V = critics.qmin(enc, dtheta_pi, Jlin, Jang, flt.joint_index)
-                action, intervened = a_nom, False
-
-        env.step_dtheta(action[0].cpu().numpy(), grip_left=goal[6], grip_right=goal[13])
-        h, _ = compute_h(env, cfg.table_margin, cfg.table_height)
-
-        v_float = float(V.item()) if hasattr(V, "item") else float(V)
-        trace["t"].append(t * cfg.control_dt)
-        trace["h"].append(float(h))
-        trace["V"].append(v_float)
-        trace["intervened"].append(bool(intervened))
-        ratio = float(np.abs(action[0].cpu().numpy()).max() / dtheta_max.max())
-        trace["dtheta_ratio"].append(ratio)
-        trace["control"].append("FILTER" if intervened else "NOMINAL")
-        if record_video and t % 2 == 0:
-            cam = env.task.cameras.observer_camera
-            cam.take_picture()
-            rgba = cam.get_picture("Color")
-            frame = (rgba * 255).clip(0, 255).astype(np.uint8)[:, :, :3]
-            video.add(frame, t * cfg.control_dt, t, T, float(h), v_float,
-                      trace["control"][-1], ratio)
-
-    h_arr = np.array(trace["h"])
-    succ = False
-    try:
-        succ = bool(env.task.check_success())
-    except Exception:
-        pass
-    trace["metrics"] = {
-        "violation_rate": float((h_arr < 0).mean()),
-        "intervention_rate": flt.intervention_rate if mode == "filtered" else 0.0,
-        "task_success": succ,
-        "min_h": float(h_arr.min()),
-        "v_le_h_frac": float((np.array(trace["V"]) <= h_arr + 1e-6).mean()),
-        "mean_gap": float((h_arr - np.array(trace["V"])).mean()),
+        video = PanelVideoWriter(
+            vid_dir / vid_name, fps=10.0,
+            h_scale=float(getattr(cfg_ep, "h_scale", 1.0)),
+        )  # 10 fps sim-time
+    ro = RolloutController(
+        cfg_ep, eval_seed, mode=mode, encoder=encoder, kin=kin,
+        policy_enc=policy_enc, actor=actor, critics=critics,
+        k=cfg_ep.replan_k, video=video,
+        max_steps=int(cfg_ep.max_steps_per_episode * 12.5),
+    )
+    trace = ro.run()
+    trace["h_scale"] = float(getattr(cfg_ep, "h_scale", 1.0))
+    trace["scene"] = {
+        "task": cfg_ep.task, "embodiment": cfg_ep.embodiment,
+        "obstacle": cfg_ep.obstacle_model, "seed": int(eval_seed),
     }
     if video is not None:
         video.close()
-        trace["video_path"] = str(vid_dir / f"eval_{mode}_s{seed}.mp4")
-    env.close()
+        trace["video_path"] = str(vid_dir / vid_name)
+
+    h_arr = np.array(trace["h"])
+    t_arr = np.array(trace["t"])
+    V_arr = np.array(trace["V"])
+    Vt_arr = np.array(trace["V_t"])
+    if len(V_arr) and len(h_arr):
+        h_at_v = np.interp(Vt_arr, t_arr, h_arr)  # h at the V eval times
+        v_le_h = float((V_arr <= h_at_v + 1e-6).mean())
+        mean_gap = float((h_at_v - V_arr).mean())
+    else:
+        v_le_h, mean_gap = float("nan"), float("nan")
+    trace["metrics"] = {
+        "violation_rate": float((h_arr < 0).mean()) if len(h_arr) else float("nan"),
+        "intervention_rate": (
+            float(trace.get("intervention_rate", 0.0)) if mode == "filtered" else 0.0
+        ),
+        "task_success": bool(trace["success"]),
+        "min_h": float(h_arr.min()) if len(h_arr) else float("nan"),
+        "v_le_h_frac": v_le_h,
+        "mean_gap": mean_gap,
+    }
     return trace
-
-
-def body_joint_index(extractor):
-    import torch as _t
-
-    return _t.from_numpy(extractor.extract()["joint_index"].numpy()[None])
 
 
 def save_eval_figure(trace, out_dir: Path, mode: str, step: int) -> Path:
@@ -150,24 +105,33 @@ def save_eval_figure(trace, out_dir: Path, mode: str, step: int) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     t = np.array(trace["t"])
     h = np.array(trace["h"])
+    # V is evaluated at window boundaries (filter cadence), not per tick
+    vt = np.array(trace.get("V_t", trace["t"][: len(trace["V"])]))
     V = np.array(trace["V"])
     interv = np.array(trace["intervened"])
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(t, h, label="h (clearance)", color="tab:blue", lw=1.5)
-    ax.plot(t, V, label="V (learned)", color="tab:red", lw=1.5)
+    ax.plot(vt, V, label="V (learned)", color="tab:red", lw=1.5, marker=".", ms=3)
     ax.axhline(0, color="k", lw=0.8)
-    ax.fill_between(t, V, h, color="tab:green", alpha=0.15, label="h - V gap")
+    if len(V) and len(t):
+        V_on_t = np.interp(t, vt, V)
+        ax.fill_between(t, V_on_t, h, color="tab:green", alpha=0.15, label="h - V gap")
     if interv.any():
-        ax.fill_between(t, h.min(), h.max(), where=interv,
+        ax.fill_between(vt, h.min(), h.max(), where=interv,
                         color="tab:orange", alpha=0.15, label="filter active")
     m = trace["metrics"]
+    scene = trace.get("scene", {})
+    scene_str = (f"{scene.get('embodiment', '?')}/{scene.get('task', '?')}"
+                 f"/{scene.get('obstacle', '?')}")
     ax.set_title(
-        f"{mode}  viol={m['violation_rate']:.2f}  int={m['intervention_rate']:.2f}  "
-        f"success={m['task_success']}  V<=h {m['v_le_h_frac']:.2f}"
+        f"{mode} {scene_str}  viol={m['violation_rate']:.2f}  "
+        f"int={m['intervention_rate']:.2f}  "
+        f"success={m['task_success']}  V<=h {m['v_le_h_frac']:.2f}",
+        fontsize=9,
     )
     ax.set_xlabel("t (s)")
-    ax.set_ylabel("metres")
+    ax.set_ylabel(f"h / V (x{trace.get('h_scale', 1):g} metres)")
     ax.legend(loc="upper right", fontsize=8)
     fig.tight_layout()
     path = out_dir / f"hv_{mode}_step{step}.png"
@@ -179,8 +143,10 @@ def save_eval_figure(trace, out_dir: Path, mode: str, step: int) -> Path:
 class PanelVideoWriter:
     """Observer frame + 320px white PIL panel -> 960x480 mp4."""
 
-    def __init__(self, path: Path, fps: float = 10.0):
+    def __init__(self, path: Path, fps: float = 5.0, h_scale: float = 1.0):
         import imageio.v2 as imageio
+
+        self.h_scale = h_scale
 
         self.writer = imageio.get_writer(
             str(path), fps=fps, codec="libx264", format="FFMPEG",
@@ -195,10 +161,11 @@ class PanelVideoWriter:
         img = Image.new("RGB", (W, H), "white")
         d = ImageDraw.Draw(img)
         color = (200, 60, 40) if control == "FILTER" else (60, 60, 60)
+        unit = f"(x{self.h_scale:g} m)"
         lines = [
             f"t = {t:5.2f} s      step {step}/{n_steps}",
-            f"h        = {h:+.3f} m",
-            f"V        = {V:+.3f} m",
+            f"h        = {h:+.3f} {unit}",
+            f"V        = {V:+.3f} {unit}",
             f"h - V    = {h - V:+.3f}",
         ]
         y = 16

@@ -99,24 +99,67 @@ def _parse_urdf_joints(urdf_path: str) -> tuple[list[dict], str]:
                 vel=vel,
             )
         )
-    children = {j["child"] for j in joints}
-    bases = [j["parent"] for j in joints if j["parent"] not in children]
-    if len(bases) != 1:
-        raise ValueError(f"expected a single kinematic chain root, got {bases}")
-    base = bases[0]
+    # arm base: walk from the GLOBAL root (a link that is a parent but
+    # never a child — e.g. 'world' in the ur5 URDF) through fixed joints;
+    # the parent of the first ACTUATED joint on that walk is the arm base.
+    # (A plain "parent never appearing as a child" rule breaks when a
+    # fixed world joint sits above the arm base.)
+    all_children = {
+        j.find("child").get("link") for j in root.iter("joint")
+    }
+    all_parents = {
+        j.find("parent").get("link") for j in root.iter("joint")
+    }
+    global_roots = [l for l in all_parents if l not in all_children]
+    if len(global_roots) != 1:
+        raise ValueError(f"expected a single URDF root, got {global_roots}")
+    joints_by_parent: dict[str, list] = {}
+    for j in root.iter("joint"):
+        joints_by_parent.setdefault(j.find("parent").get("link"), []).append(j)
+    base = None
+    queue = [global_roots[0]]
+    while queue and base is None:
+        link = queue.pop(0)
+        for j in joints_by_parent.get(link, []):
+            if j.get("type") in ("revolute", "prismatic"):
+                base = j.find("parent").get("link")
+                break
+            queue.append(j.find("child").get("link"))
+    if base is None:
+        raise ValueError(f"no actuated joint reachable from {global_roots}")
 
-    by_parent: dict[str, list[dict]] = {}
-    for j in joints:
-        by_parent.setdefault(j["parent"], []).append(j)
+    # traverse with ALL joints (fixed included) so branch links reachable
+    # only through fixed joints (e.g. Franka's panda_hand -> fingers) are
+    # covered; only actuated joints are kept in `ordered`.
+    all_joints = []
+    for j in root.iter("joint"):
+        all_joints.append(
+            (
+                j.get("type"),
+                j.find("parent").get("link"),
+                j.find("child").get("link"),
+            )
+        )
+    by_parent: dict[str, list[int]] = {}
+    for idx, (jtype, parent, child) in enumerate(all_joints):
+        by_parent.setdefault(parent, []).append(idx)
 
+    act_by_name = {j["name"]: j for j in joints}
     ordered = []
 
     def walk(link: str) -> None:
         kids = by_parent.get(link, [])
-        kids = sorted(kids, key=lambda j: 0 if j["type"] == "revolute" else 1)
-        for j in kids:
-            ordered.append(j)
-            walk(j["child"])
+        # actuated revolute first, then prismatic, then fixed
+        def sort_key(idx):
+            t = all_joints[idx][0]
+            return {"revolute": 0, "prismatic": 1}.get(t, 2)
+
+        for idx in sorted(kids, key=sort_key):
+            jtype, parent, child = all_joints[idx]
+            jname = root.findall("joint")[idx].get("name")
+            if jname in act_by_name:
+                ordered.append(act_by_name[jname])
+            walk(child)
 
     walk(base)
     if len(ordered) != len(joints):
