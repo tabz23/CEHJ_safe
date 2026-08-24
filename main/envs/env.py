@@ -45,6 +45,21 @@ def resolve_embodiment(name: str) -> str:
     raise KeyError(f"Unknown embodiment {name!r}")
 
 
+def _quat_wxyz_to_rot(q: "np.ndarray") -> "np.ndarray":
+    """wxyz quaternion (SAPIEN convention) -> 3x3 rotation matrix."""
+    import numpy as np
+
+    w, x, y, z = q / np.linalg.norm(q)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
 # Datacenter compute GPUs without RT cores (H100, A100, ...).
 _NO_RT_RE = re.compile(
     r"\b(h100|h200|h800|h20|a100|a800|a30|v100|p100|p40|b100|b200|gb200)\b",
@@ -334,7 +349,7 @@ class Env:
         msaa: int = DEFAULT_MSAA,
         observer_size: tuple[int, int] = DEFAULT_OBSERVER_SIZE,
         record_size: tuple[int, int] = RECORD_SIZE,
-        control_freq: float = 20.0,
+        control_freq: float = 25.0,
         real_time: bool = False,
     ):
         prepare()
@@ -383,9 +398,41 @@ class Env:
     def get_obs(self):
         return self.task.get_obs()
 
+    def compute_T_base2world(self) -> "np.ndarray":
+        """Kinematics root frame (dual-arm URDF base_link) in world [4, 4].
+
+        The HoloBrain dual-arm URDFs use the UNROTATED base frame (RoboTwin
+        mounts piper/franka/arx with a +90 deg z robot_pose that the ckpt
+        URDFs do not carry), so the root fix is Rz(-90). ur5's ckpt dual
+        URDF (identity mount rotation) instead offsets the left arm by
+        (-0.4, 0, 0) from base_link. Both verified by FK alignment against
+        SAPIEN link poses (measured piper: R_diff = Rz(-90) exactly).
+        Cached.
+        """
+        import numpy as np
+
+        if getattr(self, "_T_base2world", None) is not None:
+            return self._T_base2world
+        from main.network.body_features import get_arm_spec
+
+        spec = get_arm_spec(self.robot.left_urdf_path)
+        links = {l.get_name(): l for l in self.robot.left_entity.get_links()}
+        p = links[spec.base_link].get_pose()
+        T = np.eye(4)
+        T[:3, :3] = _quat_wxyz_to_rot(np.asarray(p.q, dtype=np.float64))
+        T[:3, 3] = np.asarray(p.p, dtype=np.float64)
+        fix = np.eye(4)
+        if self.embodiment == "ur5-wsg":
+            fix[:3, 3] = [0.4, 0.0, 0.0]
+        else:
+            fix[:3, :3] = [[0, 1, 0], [-1, 0, 0], [0, 0, 1]]  # Rz(-90)
+        self._T_base2world = T @ fix
+        return self._T_base2world
+
     # HoloBrain GD image normalization (0-255 scale)
     ENCODER_IMG_MEAN = (123.675, 116.28, 103.53)
     ENCODER_IMG_STD = (58.395, 57.12, 57.375)
+    ENCODER_IMG_WH = (320, 256)  # HoloBrain GD training resolution (dst_wh)
 
     @staticmethod
     def camera_extrinsic(cam) -> "np.ndarray":
@@ -402,34 +449,46 @@ class Env:
         return ext
 
     def get_encoder_obs(self) -> dict:
-        """Observation bundle with everything the HoloBrain encoders need.
+        """Observation bundle matching HoloBrain's own inference pipeline.
 
-        Captures the three data cameras (head + both wrists) and the robot
-        joint state. Feed directly into encoder.encode_visual_tokens /
-        encoder.encode_joint_angles. Everything is in the world frame —
-        do NOT pass out_extrinsic; link_pos and visual token positions are
-        both world-frame and only relative vectors matter downstream:
+        Parity with HoloBrain's deploy transforms (robotwin2_0_ur5_wsg
+        processor): camera order [left_wrist, right_wrist, HEAD] (head LAST
+        — it is the ego anchor), images resized to 320x256 with intrinsics
+        rescaled, depth alpha-masked, and the projection matrices in the EGO
+        (head-camera) frame, as in GetProjectionMat(target_coordinate="ego"):
 
-            obs = env.get_encoder_obs()
-            tokens, pos_mean, pos_max = encoder.encode_visual_tokens(
+            P_c = K_c @ ext_c @ inv(ext_head)        (base frame cancels)
+
+        Token positions come out ego-frame; pass out_extrinsic=T_ego2world
+        to encode_visual_tokens to get world metres for the trunk. The robot
+        state encoder gets ego-frame FK via embodiedment_mat=T_base2ego
+        (HoloBrain's own convention).
+
+            obs = env.get_encoder_obs(kin)
+            tokens, pos_mean, _ = encoder.encode_visual_tokens(
                 obs["imgs"], obs["depths"], obs["image_wh"],
-                obs["projection_mat"],
+                obs["projection_mat"], out_extrinsic=obs["T_ego2world"],
             )
-            state_feat = encoder.encode_joint_angles(obs["joint_state"], kin)
+            state = encoder.encode_joint_angles(
+                obs["joint_state"], kin, embodiedment_mat=obs["T_base2ego"])
 
         Keys:
-            imgs:         [1, 3, 3, H, W] float32 RGB, HoloBrain-normalized.
-            depths:       [1, 3, 1, H, W] float32 metric depth (meters).
-            image_wh:     [3, 2] int (width, height) per camera.
-            projection_mat: [1, 3, 4, 4] float64 K @ T_cam_world per camera
-                (built from the canonical Env.camera_extrinsic, the same
-                matrix verified by the projection test).
-            T_cam_world:  [4, 4] world->head-cam (reference only; the
-                encoders and body features stay in the world frame).
-            joint_state:  [1, 1, 14] float32 [L6, gripL, R6, gripR].
-            rgb:          list of raw uint8 [H, W, 3] frames (visualization).
-            camera_names: ["head", "left_wrist", "right_wrist"].
+            imgs:         [1, 3, 3, 256, 320] float32 RGB, HoloBrain-normalized.
+            depths:       [1, 3, 1, 256, 320] float32 metric depth (meters),
+                          alpha-masked (background = 0, RoboTwin convention).
+            image_wh:     [3, 2] int (width, height) = (320, 256).
+            projection_mat: [1, 3, 4, 4] float64, ego frame (see above).
+            T_ego2world:  [4, 4] ego(head-cam)->world; pass as out_extrinsic.
+            T_base2ego:   [4, 4] kin-root->ego; pass as embodiedment_mat.
+            T_cam_world:  [4, 4] world->head-cam (legacy alias of ext_head).
+            joint_state:  [1, 1, n] float32 MEASURED [Larm, gripL, Rarm, gripR]
+                          (measured, not commanded: the safety filter needs
+                          physical truth — the gap is logged as joint_cmd_gap).
+            joint_cmd_gap: float, max |commanded - measured| (diagnostic).
+            rgb:          list of raw uint8 frames (resized, visualization).
+            camera_names: ["left_wrist", "right_wrist", "head"].
         """
+        import cv2
         import numpy as np
         import torch
 
@@ -438,43 +497,71 @@ class Env:
         # (obstacles spawned since the last sync are invisible, arm poses lag)
         self.task._update_render()
         cams = self.task.cameras
-        cam_list = [
-            cams.static_camera_list[cams.head_camera_id],
-            cams.left_camera,
-            cams.right_camera,
-        ]
-        rgbs, depths, projs = [], [], []
+        cam_list = [cams.left_camera, cams.right_camera,
+                    cams.static_camera_list[cams.head_camera_id]]
+        names = ["left_wrist", "right_wrist", "head"]
+        W, H = self.ENCODER_IMG_WH
+        rgbs, depths, projs, exts = [], [], [], []
         for cam in cam_list:
             cam.take_picture()
             rgba = cam.get_picture("Color")
             rgb = (rgba * 255).clip(0, 255).astype(np.uint8)[:, :, :3]
             pos = cam.get_picture("Position")
+            # alpha mask: background/transparent pixels carry zero depth,
+            # matching the depth HoloBrain was trained on (camera.py:431-445)
             depth = np.asarray(-pos[:, :, 2], dtype=np.float32)
+            depth = depth * (rgba[:, :, 3].astype(np.float32) / 255.0)
             K = np.asarray(cam.get_intrinsic_matrix(), dtype=np.float64)
-            # projection_mat = K @ canonical T_cam_world (single source, no drift)
-            ext = self.camera_extrinsic(cam)
-            proj = np.eye(4, dtype=np.float64)
-            proj[:3, :4] = K @ ext[:3]
+            h0, w0 = rgb.shape[:2]
+            if (w0, h0) != (W, H):
+                rgb = cv2.resize(rgb, (W, H))
+                depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_NEAREST)
+                K = K.copy()
+                K[0, :] *= W / w0
+                K[1, :] *= H / h0
+            exts.append(self.camera_extrinsic(cam))
             rgbs.append(rgb)
             depths.append(depth)
-            projs.append(proj)
-        h, w = rgbs[0].shape[:2]
+            projs.append(K)
+        # ego frame = head camera (LAST in the list)
+        ext_head = exts[-1]
+        T_ego2world = np.linalg.inv(ext_head)
+        for i in range(len(cam_list)):
+            ext_c_to_ego = exts[i] @ T_ego2world
+            K = projs[i]
+            proj = np.eye(4, dtype=np.float64)
+            proj[:3, :4] = K @ ext_c_to_ego[:3]
+            projs[i] = proj
+
+        T_base2ego = ext_head @ self.compute_T_base2world()
 
         imgs = np.stack(rgbs)[None].astype(np.float32)
         imgs = (imgs - np.array(self.ENCODER_IMG_MEAN)) / np.array(self.ENCODER_IMG_STD)
         left = self.robot.get_left_arm_real_jointState()
         right = self.robot.get_right_arm_real_jointState()
+        # commanded-vs-measured gap (diagnostic: HoloBrain trained on drive
+        # targets; we feed measured — log how far apart they are)
+        cmd = np.array(
+            self.robot.get_left_arm_jointState()
+            + self.robot.get_right_arm_jointState(),
+            dtype=np.float64,
+        )
+        meas = np.array(left + right, dtype=np.float64)
+        cmd_gap = float(np.abs(cmd - meas)[: len(cmd)].max()) if len(cmd) == len(meas) else float("nan")
         return {
             "imgs": torch.from_numpy(imgs).permute(0, 1, 4, 2, 3),
             "depths": torch.from_numpy(np.stack(depths)[None, :, None]),
-            "image_wh": torch.tensor([[w, h]] * len(cam_list)),
+            "image_wh": torch.tensor([[W, H]] * len(cam_list)),
             "projection_mat": torch.from_numpy(np.stack(projs)[None]),
-            "T_cam_world": self.camera_extrinsic(cam_list[0]),
+            "T_ego2world": T_ego2world,
+            "T_base2ego": T_base2ego,
+            "T_cam_world": ext_head,
             "joint_state": torch.tensor(
                 [left + right], dtype=torch.float32
             )[None],
+            "joint_cmd_gap": cmd_gap,
             "rgb": rgbs,
-            "camera_names": ["head", "left_wrist", "right_wrist"],
+            "camera_names": names,
         }
 
     def step_dtheta(self, dtheta, grip_left=None, grip_right=None) -> float:
@@ -546,11 +633,20 @@ class Env:
                 16-dim), gripper values normalized to [0, 1]. `None` holds
                 the current drive targets.
 
+        The arm targets are INTERPOLATED across the tick's physics substeps
+        with a velocity feedforward (theta_d(k) = q0 + dtheta*k/N,
+        theta_dot_d = dtheta/dt) — the same (pos, vel) semantics the
+        nominal's cuRobo executor uses. Holding a single position target
+        with zero velocity across the tick realizes only ~kp/kd-damped
+        fraction of the command (~20% per 40 ms tick), which would make the
+        actor's and the nominal's actions different physical quantities.
+
         Returns:
             sim_time (seconds) after the step.
         """
         import numpy as np
 
+        interp = None
         if action is not None:
             action = np.asarray(action, dtype=np.float64).reshape(-1)
             if action.shape[0] < 4 or action.shape[0] % 2 != 0:
@@ -559,13 +655,21 @@ class Env:
                     f"got {action.shape}"
                 )
             n = (action.shape[0] - 2) // 2
-            zeros = np.zeros(n)
-            self.robot.set_arm_joints(action[0:n], zeros, "left")
+            q0_l = np.array(self.robot.get_left_arm_real_jointState()[:n],
+                            dtype=np.float64)
+            q0_r = np.array(self.robot.get_right_arm_real_jointState()[:n],
+                            dtype=np.float64)
+            interp = (q0_l, action[0:n] - q0_l, q0_r,
+                      action[n + 1:n + 1 + n] - q0_r)
             self.robot.set_gripper(float(action[n]), "left")
-            self.robot.set_arm_joints(action[n + 1:n + 1 + n], zeros, "right")
             self.robot.set_gripper(float(action[2 * n + 1]), "right")
         n = self._physics_substeps()
-        for _ in range(n):
+        dt = n / self.PHYSICS_FREQ  # actual tick duration
+        for k in range(1, n + 1):
+            if interp is not None:
+                q0_l, d_l, q0_r, d_r = interp
+                self.robot.set_arm_joints(q0_l + d_l * (k / n), d_l / dt, "left")
+                self.robot.set_arm_joints(q0_r + d_r * (k / n), d_r / dt, "right")
             self.task.scene.step()
         self.task._update_render()
         self.n_control_steps += 1

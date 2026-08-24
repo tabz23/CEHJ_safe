@@ -22,34 +22,29 @@ import sys
 CEHJ_ROOT = Path(__file__).resolve().parents[2]
 
 
-def run_eval_episode(cfg, eval_index, mode, encoder, policy_enc, actor, critics,
-                     record_video=True, tag=""):
-    """Run one eval episode ('filtered' — nominal + safety filter) on the
-    run.py controller stack (PlanEveryKController, k = cfg.replan_k) via
+def run_eval_episode(cfg, seed, task, embodiment, encoder, policy_enc, actor,
+                     critics, record_video=True, tag=""):
+    """Run one filtered eval episode (nominal + safety filter, the Q(s,
+    a_nom) trigger) on an explicit (task, embodiment, seed) scene via
     RolloutController; return trace dict.
-
-    The (task, embodiment, obstacle) triple is sampled deterministically
-    from eval_index (rng seeded by eval_seeds[0] + eval_index), so every
-    eval is a fresh but reproducible scene — cross-embodiment, like
-    collection. The scene seed is the same eval seed.
 
     Note: NOT globally no_grad — cuRobo planning needs autograd. Model
     calls are wrapped in no_grad locally inside RolloutController.
     """
-    from main.train.collect import CKPT_DIR, make_kinematics, sample_scene
+    import dataclasses
+
+    from main.train.collect import CKPT_DIR, make_kinematics
     from main.train.rollout import RolloutController
 
-    eval_seed = cfg.eval_seeds[0] + eval_index
-    rng = np.random.RandomState(eval_seed)
-    cfg_ep = sample_scene(cfg, rng) if getattr(cfg, "randomize_scenes", False) else cfg
+    cfg_ep = dataclasses.replace(cfg, task=task, embodiment=embodiment)
     kin = make_kinematics(CKPT_DIR, cfg_ep.embodiment)
-    print(f"[eval {eval_index}] {cfg_ep.embodiment} / {cfg_ep.task} / "
-          f"{cfg_ep.obstacle_model} seed={eval_seed}")
+    print(f"[eval] {cfg_ep.embodiment} / {cfg_ep.task} / "
+          f"{cfg_ep.obstacle_model} seed={seed}")
 
     video = None
     vid_dir = CEHJ_ROOT / "runs" / "videos"
-    vid_name = (f"eval_{mode}_{cfg_ep.embodiment}_{cfg_ep.task}"
-                f"_s{eval_seed}{tag}.mp4")
+    vid_name = (f"eval_filtered_{cfg_ep.embodiment}_{cfg_ep.task}"
+                f"_s{seed}{tag}.mp4")
     if record_video:
         vid_dir.mkdir(parents=True, exist_ok=True)
         video = PanelVideoWriter(
@@ -57,16 +52,16 @@ def run_eval_episode(cfg, eval_index, mode, encoder, policy_enc, actor, critics,
             h_scale=float(getattr(cfg_ep, "h_scale", 1.0)),
         )  # 10 fps sim-time
     ro = RolloutController(
-        cfg_ep, eval_seed, mode=mode, encoder=encoder, kin=kin,
+        cfg_ep, seed, mode="filtered", encoder=encoder, kin=kin,
         policy_enc=policy_enc, actor=actor, critics=critics,
-        k=cfg_ep.replan_k, video=video,
-        max_steps=int(cfg_ep.max_steps_per_episode * 12.5),
+        video=video,
+        max_steps=int(cfg_ep.max_steps_per_episode * 250.0 / 25.0),
     )
     trace = ro.run()
     trace["h_scale"] = float(getattr(cfg_ep, "h_scale", 1.0))
     trace["scene"] = {
         "task": cfg_ep.task, "embodiment": cfg_ep.embodiment,
-        "obstacle": cfg_ep.obstacle_model, "seed": int(eval_seed),
+        "obstacle": cfg_ep.obstacle_model, "seed": int(seed),
     }
     if video is not None:
         video.close()
@@ -84,9 +79,8 @@ def run_eval_episode(cfg, eval_index, mode, encoder, policy_enc, actor, critics,
         v_le_h, mean_gap = float("nan"), float("nan")
     trace["metrics"] = {
         "violation_rate": float((h_arr < 0).mean()) if len(h_arr) else float("nan"),
-        "intervention_rate": (
-            float(trace.get("intervention_rate", 0.0)) if mode == "filtered" else 0.0
-        ),
+        "intervention_rate": float(trace.get("intervention_rate", 0.0)),
+        "mode_switches": int(trace.get("mode_switches", 0)),
         "task_success": bool(trace["success"]),
         "min_h": float(h_arr.min()) if len(h_arr) else float("nan"),
         "v_le_h_frac": v_le_h,
@@ -154,8 +148,13 @@ class PanelVideoWriter:
         )
         self.hist_h, self.hist_V, self.hist_int = [], [], []
 
-    def _panel(self, t, step, n_steps, h, V, control, ratio):
+    def _panel(self, t, step, n_steps, h, V, control, ratio, extras=None):
         from PIL import Image, ImageDraw
+
+        def _cm(val):
+            if val is None or not np.isfinite(val):
+                return "  inf "
+            return f"{val * 100:5.1f}"
 
         W, H = 320, 480
         img = Image.new("RGB", (W, H), "white")
@@ -165,8 +164,8 @@ class PanelVideoWriter:
         lines = [
             f"t = {t:5.2f} s      step {step}/{n_steps}",
             f"h        = {h:+.3f} {unit}",
-            f"V        = {V:+.3f} {unit}",
-            f"h - V    = {h - V:+.3f}",
+            f"Q(s,a_nom)= {V:+.3f} {unit}",
+            f"h - Q    = {h - V:+.3f}",
         ]
         y = 16
         for line in lines:
@@ -175,6 +174,26 @@ class PanelVideoWriter:
         d.text((12, y), f"control  =  {control}", fill=color)
         y += 22
         d.text((12, y), f"|dtheta| =  {ratio:.2f} x max", fill=(0, 0, 0))
+        y += 22
+        if extras:
+            d.text(
+                (12, y),
+                f"dL {_cm(extras.get('d_left'))}  dR {_cm(extras.get('d_right'))} cm",
+                fill=(0, 0, 0),
+            )
+            y += 18
+            d.text(
+                (12, y),
+                f"dLh {_cm(extras.get('d_left_held'))} dRh {_cm(extras.get('d_right_held'))} cm",
+                fill=(0, 0, 0),
+            )
+            y += 18
+            argmin = extras.get("true_argmin") or "-"
+            d.text((12, y), f"argmin: {argmin}", fill=(0, 0, 0))
+            y += 18
+            skill = extras.get("skill") or "-"
+            d.text((12, y), skill[:38], fill=(80, 80, 80))
+            y += 18
 
         # scrolling mini-plot of h and V (last ~5 s)
         self.hist_h.append(h)
@@ -201,8 +220,8 @@ class PanelVideoWriter:
             d.text((x0 + 20, y0 + 4), "V", fill=(220, 60, 50))
         return img
 
-    def add(self, frame_rgb, t, step, n_steps, h, V, control, ratio):
-        panel = self._panel(t, step, n_steps, h, V, control, ratio)
+    def add(self, frame_rgb, t, step, n_steps, h, V, control, ratio, extras=None):
+        panel = self._panel(t, step, n_steps, h, V, control, ratio, extras=extras)
         combo = np.hstack([frame_rgb, np.asarray(panel)])
         self.writer.append_data(combo)
 

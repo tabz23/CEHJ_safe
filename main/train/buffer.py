@@ -51,6 +51,8 @@ FIELDS = {
     "body_mask": (np.bool_, (20,)),
     "joint_index": (np.int8, (20,)),
     "embodiment_id": (np.int8, ()),
+    "task_id": (np.int8, ()),
+    "action_source": (np.int8, ()),  # 0 planner / 1 actor / 2 perturbation
     "episode_id": (np.int32, ()),
     "done": (np.bool_, ()),
 }
@@ -62,7 +64,8 @@ NEXT_FIELDS = (
     "joint_index", "scene_tokens", "scene_pos",
     "Jlin", "Jang", "dtheta_max",
 )
-CUR_FIELDS = NEXT_FIELDS + ("h", "dtheta")
+CUR_FIELDS = NEXT_FIELDS + ("h", "dtheta", "embodiment_id", "task_id",
+                            "action_source")
 
 
 class StepBuffer:

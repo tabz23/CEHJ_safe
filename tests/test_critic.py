@@ -36,9 +36,11 @@ def main() -> None:
 
     # ---- full pipeline to Encoded ----
     obs = env.get_encoder_obs()
-    state_tokens = encoder.encode_joint_angles(obs["joint_state"], kin).squeeze(2)
+    state_tokens = encoder.encode_joint_angles(obs["joint_state"], kin,
+                            embodiedment_mat=obs["T_base2ego"]).squeeze(2)
     tokens, pos_mean, _ = encoder.encode_visual_tokens(
-        obs["imgs"], obs["depths"], obs["image_wh"], obs["projection_mat"]
+        obs["imgs"], obs["depths"], obs["image_wh"], obs["projection_mat"],
+        out_extrinsic=obs["T_ego2world"],
     )
     body = extractor.extract()
     with torch.no_grad():

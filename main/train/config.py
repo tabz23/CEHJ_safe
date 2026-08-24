@@ -18,40 +18,42 @@ from pathlib import Path
 @dataclass
 class FrozenConfig:
     # problem definition (change what V means)
-    control_dt: float = 0.05            # 20 Hz control
+    control_dt: float = 0.04            # 25 Hz control: 250/25 = exactly 10 physics steps/tick
     kappa: float = 0.25                 # fraction of URDF vel limit per step
     softmin_T: float = 0.02             # metres; softmin temperature
     gamma: float = 0.9                  # HJ discount (annealed -> gamma_final)
     gamma_final: float = 0.999
     gamma_anneal_steps: int = 50_000
-    table_margin: float = 0.01          # table gets its own clearance margin (m)
-    table_height: float = 0.74          # RoboTwin default table height (m); part of h's definition
-    h_scale: float = 20.0               # h/V are trained in h*h_scale units (h is ~mm-cm
-                                        # here; 20x better-conditioned targets). softmin_T
-                                        # and the filter margins below stay in PHYSICAL
-                                        # metres and are multiplied by h_scale at use.
+    table_margin: float = 0.01          # table margin for cuRobo's world model (NOT in h)
+    table_height: float = 0.74          # RoboTwin default table height (m)
+    h_scale: float = 100.0              # h/V are trained in h*h_scale units (= cm; h here
+                                        # is ~mm-cm). softmin_T and the filter margin below
+                                        # stay in PHYSICAL metres, scaled at use. Watch
+                                        # gn_critic: targets 5x larger vs h_scale=20.
     obstacle_mode: str = "on_path"      # safety obstacle spawn mode for collection
-    obstacle_t: float = 0.6             # corridor t for on_path spawns (unsafe level 2)
+    obstacle_t: float | None = None     # corridor t; None = sample per episode via
+                                        # run.py's _corridor_t(seed) in U[0.3, 0.7]
+    off_path_frac: float = 0.2          # fraction of episodes with off_path obstacle
+    filter_episode_frac: float = 0.8    # fraction of collection episodes with the filter
     h_include_payload: bool = True      # grasped object joins the body set after grasp
     encoder_variant: str = "HoloBrain_v0.0_GD"
     feature_level: tuple = (1, 2)
 
-    # collection — each episode samples a random (task, embodiment, obstacle)
-    # triple from the choices below (cross-embodiment training: no fixed scene)
+    # collection — cyclic schedule over the task x embodiment product (exact
+    # balance), obstacle fixed to match the reference sweep geometry
     task: str = "stack_blocks_two"
     embodiment: str = "piper"
-    obstacle_model: str = "086_woodenblock"
+    obstacle_model: str = "068_boxdrink"
     task_choices: tuple = (
-        "stack_blocks_two", "stack_bowls_two", "grab_roller",
-        "pick_dual_bottles", "place_bread_basket", "place_burger_fries",
-        "place_can_basket", "place_cans_plasticbox",
+        "stack_blocks_two", "stack_bowls_two", "place_burger_fries",
+        "place_bread_basket", "place_can_basket",
     )
     embodiment_choices: tuple = ("piper", "franka-panda", "ARX-X5", "ur5-wsg")
-    obstacle_choices: tuple = ("086_woodenblock", "059_pencup")
+    obstacle_choices: tuple = ("068_boxdrink",)
     randomize_scenes: bool = True       # sample triples per episode/eval
-    replan_k: int = 60                  # PlanEveryKController window (physics steps); part of the nominal definition
+    hj_hold_ticks: int = 3              # filter intervention block, control ticks (0.12 s)
     n_episodes: int = 25
-    max_steps_per_episode: int = 400
+    max_steps_per_episode: int = 450    # control ticks: 450 * 10 = 4500 physics steps (18 s)
     perturb_prob: float = 0.05          # random dtheta injection probability
     rgbsd_archive_every: int = 25       # low-cadence RGB-D archive stride
 
@@ -66,9 +68,10 @@ class FrozenConfig:
     eval_every: int = 1024              # one epoch = 1024 grad steps (test runs: 50)
     eval_seeds: tuple = (1000, 1001)
 
-    # deployment filter
-    margin_on: float = 0.0              # engage filter below this V (physical m, scaled at use)
-    margin_off: float = 0.005           # release above this V (physical m; hysteresis)
+    # deployment filter: single margin, engage when Q(s, a_nom) < margin
+    # (physical m, scaled by h_scale at use). No hysteresis band — the
+    # hj_hold_ticks block provides the commitment.
+    filter_margin: float = 0.01
 
     urdf_hash: str = ""                 # filled at run start
     version: int = 1

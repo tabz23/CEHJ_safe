@@ -1,4 +1,10 @@
-"""Repro the franka 5 Hz filter crash with a full traceback."""
+"""Filter smoke on the tick-chunked vanilla nominal (Phase 4).
+
+Filtered rollout with untrained actor/critics on one scene: verifies the
+Q(s, a_nom) trigger path runs end-to-end — a_nom assembly from the live
+plan, per-tick V trace, 3-tick intervention blocks, forced replan after
+each intervention, and the mode-switch counter.
+"""
 import sys
 from pathlib import Path
 
@@ -11,8 +17,8 @@ from main.train.collect import CKPT_DIR, make_kinematics
 from main.train.config import FrozenConfig
 from main.train.rollout import RolloutController
 
-cfg = FrozenConfig(task="place_empty_cup", embodiment="franka-panda",
-                   obstacle_mode="on_path")
+cfg = FrozenConfig(task="stack_blocks_two", embodiment="franka-panda",
+                   obstacle_mode="on_path", randomize_scenes=False)
 
 encoder = HoloBrainEncoder(str(CKPT_DIR), device="cuda")
 kin = make_kinematics(CKPT_DIR, cfg.embodiment)
@@ -23,7 +29,10 @@ actor = TokenActor().cuda().eval()
 critics = TwinCritic().cuda().eval()
 
 ro = RolloutController(cfg, seed=0, mode="filtered", encoder=encoder, kin=kin,
-                       policy_enc=policy_enc, actor=actor, critics=critics, k=50)
+                       policy_enc=policy_enc, actor=actor, critics=critics)
 trace = ro.run()
 print("success:", trace["success"])
-print("windows:", len(trace["V"]), "interventions:", trace.get("interventions"))
+print("ticks with V:", len(trace["V"]), "interventions:", trace.get("interventions"),
+      "mode switches:", trace.get("mode_switches"))
+assert len(trace["V"]) > 0, "filter never evaluated"
+print("FILTER SMOKE PASSED")

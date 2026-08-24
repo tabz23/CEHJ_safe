@@ -1,11 +1,10 @@
 """Stage 1 — collection driver for HJ-SAC.
 
-Episodes run on the run.py controller stack (PlanEveryKController,
-k = cfg.replan_k) via RolloutController mode='collect'. Per control tick
-at 20 Hz the frozen encoder tokens, analytic body features, and the
-privileged h are captured; dtheta stored per entry is the MEASURED
-arm-joint displacement to the next entry (never commanded). Random
-dtheta perturbations fire at window boundaries (cfg.perturb_prob).
+Episodes run on the run.py-style stack (TickChunkedController: vanilla
+nominal + per-tick hook) via RolloutController mode='collect'. Per control
+tick at 25 Hz the frozen encoder tokens, analytic body features, and the
+privileged h are captured; dtheta stored per entry is the COMMANDED action
+of that tick (planner a_nom / actor / perturbation — see action_source).
 
 No termination on violation — the avoid-Bellman needs transitions in the
 unsafe region. episode_id/done written from step zero.
@@ -110,7 +109,7 @@ def make_kinematics(ckpt_dir: Path, embodiment: str = "piper"):
 ARM_DISTANCE = {"ur5-wsg": 0.8}  # ckpt dual-ur5 URDF mounts the arms 0.8 m apart
 
 
-def make_training_env(cfg: FrozenConfig, seed: int, control_freq: float = 20.0):
+def make_training_env(cfg: FrozenConfig, seed: int, control_freq: float = 25.0):
     """Env built exactly like run.py's: controller install, on-path obstacle
     present in the scene, cuRobo world refreshed. The expert/nominal ignores
     the obstacle in planning but plays through it physically — that is where
@@ -124,8 +123,15 @@ def make_training_env(cfg: FrozenConfig, seed: int, control_freq: float = 20.0):
     env = Env(cfg.task, cfg.embodiment, seed,
               arm_distance=ARM_DISTANCE.get(cfg.embodiment, 0.6),
               control_freq=control_freq)
+    # corridor t: config override, else the run.py sampler (sweep parity)
+    if cfg.obstacle_t is not None:
+        t = float(cfg.obstacle_t)
+    else:
+        from main.envs.run import _corridor_t
+
+        t = _corridor_t(seed)
     actor, xyz, half, _arm = choose_and_spawn(
-        env, cfg.obstacle_mode, "geometric", cfg.obstacle_t, "auto",
+        env, cfg.obstacle_mode, "geometric", t, "auto",
         obstacle_model=getattr(cfg, "obstacle_model", "086_woodenblock"),
     )
     env.obstacle = actor
@@ -136,55 +142,115 @@ def make_training_env(cfg: FrozenConfig, seed: int, control_freq: float = 20.0):
     return env
 
 
-def sample_scene(cfg: FrozenConfig, rng: np.random.RandomState):
-    """One random (task, embodiment, obstacle) triple for a scene init —
-    cross-embodiment training: no fixed scene. Returns a cfg copy."""
+def episode_schedule(cfg: FrozenConfig, n_episodes: int, seed: int = 0):
+    """Fixed cyclic schedule over the shuffled (task, embodiment) product —
+    every combination appears floor(n/20) times, so counts are exactly
+    balanced (IID sampling leaves the 20 combos badly unbalanced)."""
+    import itertools
+
+    combos = list(itertools.product(
+        list(cfg.task_choices), list(cfg.embodiment_choices)
+    ))
+    rng = np.random.RandomState(seed)
+    rng.shuffle(combos)
+    return [combos[i % len(combos)] for i in range(n_episodes)]
+
+
+def sample_scene(cfg: FrozenConfig, rng: np.random.RandomState,
+                 task: str | None = None, embodiment: str | None = None):
+    """One randomized cfg for a scene init: task/embodiment given (cyclic
+    schedule) or drawn at random; obstacle from obstacle_choices; obstacle
+    placement 80/20 on_path/off_path (independent draw — avoids confounding
+    the filter engaging with the obstacle being in the way)."""
     import dataclasses
 
+    task = task or str(rng.choice(list(cfg.task_choices)))
+    embodiment = embodiment or str(rng.choice(list(cfg.embodiment_choices)))
+    obstacle = str(rng.choice(list(cfg.obstacle_choices)))
+    mode = "off_path" if rng.rand() < cfg.off_path_frac else "on_path"
     return dataclasses.replace(
-        cfg,
-        task=str(rng.choice(list(cfg.task_choices))),
-        embodiment=str(rng.choice(list(cfg.embodiment_choices))),
-        obstacle_model=str(rng.choice(list(cfg.obstacle_choices))),
+        cfg, task=task, embodiment=embodiment, obstacle_model=obstacle,
+        obstacle_mode=mode,
     )
 
 
-def collect(cfg: FrozenConfig, out_root: Path) -> Path:
-    """Collect episodes with the run.py controller stack (PlanEveryKController,
-    k = cfg.replan_k) via RolloutController mode='collect'. Per-tick encoder
-    tokens + body features + h are written to the buffer; dtheta is the
-    measured arm-joint displacement between consecutive entries. Each
-    episode samples a random (task, embodiment, obstacle) triple."""
+def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
+            episode_offset: int = 0, encoder=None, models=None,
+            round_index: int = 0) -> Path:
+    """Collect episodes with the run.py-style controller stack
+    (TickChunkedController) via RolloutController mode='collect'. Per-tick
+    encoder tokens + body features + h are written to the buffer; dtheta is
+    the commanded action of that tick.
+
+    Episode structure: a fixed cyclic schedule over the shuffled
+    (task, embodiment) product (exact balance); per episode, independent
+    draws for obstacle placement (80/20 on/off path) and behavior policy
+    (filter_episode_frac with the HJ filter when models are given; round 0
+    is always nominal-only). Episodes whose obstacle fails to spawn are
+    re-drawn into the same schedule slot (h = +inf would NaN the target).
+    """
     from main.train.rollout import RolloutController  # lazy: rollout imports us
 
     out_root = Path(out_root).resolve()  # RoboTwin chdirs during env setup
     out_root.mkdir(parents=True, exist_ok=True)
     cfg.save(out_root / "config.json")  # train.py loads this
 
-    encoder = HoloBrainEncoder(str(CKPT_DIR), device="cuda")
+    if encoder is None:
+        encoder = HoloBrainEncoder(str(CKPT_DIR), device="cuda")
     kins = {}  # per-embodiment kinematics, built on first use
 
-    capacity = cfg.n_episodes * (cfg.max_steps_per_episode + 2)
-    buf = StepBuffer(out_root / "buffer", capacity=capacity, header=cfg.to_dict())
+    if buf is None:
+        capacity = cfg.n_episodes * (cfg.max_steps_per_episode + 2)
+        buf = StepBuffer(out_root / "buffer", capacity=capacity,
+                         header=cfg.to_dict())
 
     rng = np.random.RandomState(0)
+    schedule = episode_schedule(cfg, cfg.n_episodes, seed=round_index)
     t_start = time.time()
     n_written = 0
+    n_skipped = 0
 
     for ep in range(cfg.n_episodes):
-        cfg_ep = sample_scene(cfg, rng) if cfg.randomize_scenes else cfg
-        if cfg_ep.embodiment not in kins:
-            kins[cfg_ep.embodiment] = make_kinematics(CKPT_DIR, cfg_ep.embodiment)
-        ro = RolloutController(
-            cfg_ep, seed=ep, mode="collect", encoder=encoder,
-            kin=kins[cfg_ep.embodiment],
-            k=cfg_ep.replan_k, buf=buf, episode_id=ep,
-            perturb_prob=cfg_ep.perturb_prob, rng=rng,
-            # 12.5 physics steps per 20 Hz tick: exactly max_steps_per_episode
-            # control ticks
-            max_steps=int(cfg_ep.max_steps_per_episode * 12.5),
-        )
-        print(f"ep {ep}: {cfg_ep.embodiment} / {cfg_ep.task} / {cfg_ep.obstacle_model}")
+        task_ep, emb_ep = schedule[ep]
+        # total spawn guarantee: with h = d_block only, an obstacle-free
+        # episode would store h = +inf and NaN the Bellman target — re-draw
+        # the slot (keeping the SAME task/embodiment) instead
+        ro = None
+        for _retry in range(5):
+            cfg_ep = sample_scene(cfg, rng, task_ep, emb_ep) \
+                if cfg.randomize_scenes else cfg
+            if cfg_ep.embodiment not in kins:
+                kins[cfg_ep.embodiment] = make_kinematics(CKPT_DIR, cfg_ep.embodiment)
+            # behavior policy: filter episodes only when models exist and
+            # the draw passes; round 0 (no models) is always nominal-only
+            use_filter = (
+                models is not None
+                and rng.rand() < cfg.filter_episode_frac
+            )
+            candidate = RolloutController(
+                cfg_ep, seed=episode_offset + ep, mode="collect",
+                encoder=encoder, kin=kins[cfg_ep.embodiment],
+                policy_enc=models[0] if models else None,
+                actor=models[1] if models else None,
+                critics=models[2] if models else None,
+                filter_active=use_filter,
+                buf=buf, episode_id=episode_offset + ep,
+                perturb_prob=cfg_ep.perturb_prob, rng=rng,
+                max_steps=int(cfg_ep.max_steps_per_episode * 250.0 / 25.0),
+            )
+            if candidate.env.obstacle is not None:
+                ro = candidate
+                break
+            print(f"[collect] ep {ep}: spawn failed for {cfg_ep.task}/"
+                  f"{cfg_ep.embodiment}; re-drawing")
+            candidate.env.close()
+        if ro is None:
+            n_skipped += 1
+            print(f"[collect] ep {ep}: 5 spawn failures; skipping episode")
+            continue
+        print(f"ep {ep}: {cfg_ep.embodiment} / {cfg_ep.task} / "
+              f"{cfg_ep.obstacle_model} / {cfg_ep.obstacle_mode} / "
+              f"{'FILTER' if use_filter else 'nominal'}")
         try:
             trace = ro.run()
         except Exception:
@@ -224,11 +290,10 @@ def main() -> None:
     p.add_argument("--episodes", type=int, default=25)
     p.add_argument("--task", default="stack_blocks_two")
     p.add_argument("--embodiment", default="piper")
-    p.add_argument("--replan-k", type=int, default=60)
     p.add_argument("--out", type=Path, default=CEHJ_ROOT / "data" / "smoke")
     args = p.parse_args()
     cfg = FrozenConfig(task=args.task, embodiment=args.embodiment,
-                       n_episodes=args.episodes, replan_k=args.replan_k)
+                       n_episodes=args.episodes)
     collect(cfg, args.out)
 
 

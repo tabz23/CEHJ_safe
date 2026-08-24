@@ -8,16 +8,20 @@ Obstacle set rules (per phase, not filtered):
   - after grasp, the held object joins the BODY set (its distance to the
     obstacles counts) via distance_info's held-actor terms
   - after release it leaves the body set again
-  - the table is a legitimate obstacle with its OWN margin: the gripper
-    must approach it within centimetres, so its contribution is
-    (link clearance above the table) - table_margin
+
+The table is NOT part of h: it is a workspace constraint the planner already
+handles (update_curobo_world puts it in cuRobo's world model). h scores only
+the spawned safety obstacle — h == d_system == d_min, the same number the
+sweeps report, and per-link argmin always names the link genuinely closest
+to the obstacle. CONSEQUENCE: h is +inf without an obstacle, so spawning is
+total (obstacle.py tiered fallback; episodes that fail to spawn are skipped).
 
 Self-collision is explicitly out of scope: h covers robot-to-environment
 clearance only; arm-arm tangling is the nominal controller's
-reachability problem. (Reviewer note: yes, we know.)
+reachability problem.
 
 Logged alongside the scalar (privileged, sim-only):
-  - per-link clearance breakdown (true argmin — to check learned argmin V_i)
+  - per-link obstacle clearance breakdown (true argmin for learned argmin V_i)
   - arm-to-arm distance (to attribute task failures h doesn't see)
 """
 
@@ -54,7 +58,11 @@ def _arm_spheres(env):
 
 
 def compute_h(env, table_margin: float = 0.01, table_height: float = TABLE_HEIGHT) -> tuple[float, dict]:
-    """Current h and privileged diagnostics."""
+    """Current h (obstacle distance only) and privileged diagnostics.
+
+    table_margin/table_height are unused by h itself (kept in the signature
+    for the below-table diagnostic and FrozenConfig compatibility).
+    """
     # --- robot arms ∪ payload vs the spawned obstacle (per-phase rules live
     # inside distance_info: cup never an obstacle, held payload joins body) ---
     info = distance_info(env)
@@ -63,8 +71,7 @@ def compute_h(env, table_margin: float = 0.01, table_height: float = TABLE_HEIGH
     else:
         d_block = float("inf")
 
-    # --- per-link breakdown: block + table ---
-    table_z = table_height + float(env.task.table_z_bias)
+    # --- per-link breakdown: obstacle only ---
     per_link: dict[str, float] = {}
     left_spheres, right_spheres = [], []
     for label, center, radius in _arm_spheres(env):
@@ -77,12 +84,7 @@ def compute_h(env, table_margin: float = 0.01, table_height: float = TABLE_HEIGH
                 env.obstacle, getattr(env, "obstacle_half", None)
             )
             best = point_obb_signed_distance(center, origin, rot, half) - radius
-        d_tab = center[2] - radius - table_z - table_margin
-        per_link[label] = min(best, d_tab)
-
-    d_table = min(
-        (c[2] - r - table_z - table_margin) for c, r in left_spheres + right_spheres
-    )
+        per_link[label] = best
 
     # --- arm-to-arm distance (diagnostic only; NOT in h) ---
     d_arm_arm = float("inf")
@@ -92,17 +94,28 @@ def compute_h(env, table_margin: float = 0.01, table_height: float = TABLE_HEIGH
                 d_arm_arm, float(np.linalg.norm(c1 - c2)) - r1 - r2
             )
 
-    h = min(d_block, d_table)
+    # --- below-table fraction (diagnostic for the accepted risk of not
+    # scoring the table in h) ---
+    table_z = table_height + float(env.task.table_z_bias)
+    n_below = sum(
+        1 for c, r in left_spheres + right_spheres if c[2] - r < table_z
+    )
+
+    h = d_block
     true_argmin = min(per_link, key=per_link.get) if per_link else ""
     diag = {
         "h": h,
         "d_block": d_block,
-        "d_table": d_table,
         "d_held": info["d_held"],
+        "d_left": info.get("d_left", float("inf")),
+        "d_right": info.get("d_right", float("inf")),
+        "d_left_held": info.get("d_left_held", float("inf")),
+        "d_right_held": info.get("d_right_held", float("inf")),
         "d_arm_arm": d_arm_arm,
         "per_link": per_link,
         "true_argmin": true_argmin,
         "holding": info.get("holding", ""),
         "contact": info.get("contact", False),
+        "n_below_table": n_below,
     }
     return h, diag

@@ -297,15 +297,41 @@ class HoloBrainEncoder(nn.Module):
         return self.robot_state_encoder(robot_state, joint_relative_pos, joint_mask)
 
     @torch.no_grad()
-    def encode_joint_angles(self, joint_state, kinematics, joint_mask=None):
-        """Encode raw joint angles [B, T, 14] (or [B, 14]) via FK + state encoder.
+    def encode_joint_angles(self, joint_state, kinematics, joint_mask=None,
+                            embodiedment_mat=None):
+        """Encode raw joint angles [B, T, n] (or [B, n]) via FK + state encoder.
 
-        Layout: [left_arm(6), left_gripper, right_arm(6), right_gripper].
+        Layout: [left_arm, left_gripper, right_arm, right_gripper].
+        embodiedment_mat: optional [4, 4] base->ego transform applied to the
+        FK link poses (HoloBrain trains the state encoder on ego-frame poses).
         Returns [B, n_link, T, embed_dims].
         """
         if joint_state.dim() == 2:
             joint_state = joint_state[:, None]
-        robot_state = kinematics.joint_state_to_robot_state(joint_state)
+        if embodiedment_mat is not None:
+            embodiedment_mat = torch.as_tensor(
+                embodiedment_mat, dtype=torch.float32
+            )
+        robot_state = kinematics.joint_state_to_robot_state(
+            joint_state, embodiedment_mat
+        )
+        # HoloBrain parity (processor joint_mask + AddScaleShift): the robot
+        # state encoder sees arm thetas masked to -1 (theta is redundant
+        # with the FK pose channels) and the gripper scalar normalized
+        # (g - 0.5) / 0.5 -> [-1, 1] (both processor JSONs use [0.5, 0.5]
+        # on the gripper entries).
+        n_arm = len(kinematics.arm_link_keys[0])
+        n_per_arm = n_arm + 1
+        n_link = robot_state.shape[-2]
+        assert n_link == 2 * n_per_arm, (
+            f"expected [arm x {n_arm} + gripper] x 2 links, got {n_link}"
+        )
+        idx = torch.arange(n_link, device=robot_state.device)
+        is_arm = (idx % n_per_arm) < n_arm
+        robot_state = robot_state.clone()
+        robot_state[..., ~is_arm, 0] = (robot_state[..., ~is_arm, 0] - 0.5) / 0.5
+        if joint_mask is None:
+            joint_mask = is_arm.unsqueeze(0).expand(robot_state.shape[0], -1)
         return self.encode_robot_state(
             robot_state, kinematics.joint_relative_pos, joint_mask
         )

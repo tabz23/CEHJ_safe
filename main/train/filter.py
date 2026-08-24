@@ -1,9 +1,15 @@
-"""Deployment filter: least-restrictive override with hysteresis.
+"""Deployment filter: least-restrictive override on the NOMINAL's action.
 
-    a = a_nom  if V(s) >= margin  else  actor(s, deterministic=True)
+    intervene  iff  Q(s, a_nom) < margin
 
-Engages below margin_on, releases above margin_off (> margin_on) — a state
-near threshold doesn't chatter between branches.
+The trigger scores the planner's own action for the upcoming tick — "if the
+nominal does what it wants and the robot then behaves optimally safely, does
+it stay clear" — not the safe actor's rescue ability (the old Q(s, pi_safe)
+trigger, which only goes unsafe once the safe policy is already losing).
+
+Single margin, no hysteresis: commitment comes from the hj_hold_ticks
+intervention block instead (the RolloutController re-checks Q(s, a_nom) at
+each block boundary and resumes the nominal when it clears the margin).
 """
 
 from __future__ import annotations
@@ -13,42 +19,47 @@ import torch
 
 class SafetyFilter:
     def __init__(self, actor, critics, joint_index, dtheta_max,
-                 margin_on: float = 0.0, margin_off: float = 0.02):
+                 margin: float, hold_ticks: int = 3):
         self.actor = actor
         self.critics = critics
         self.joint_index = joint_index
         self.dtheta_max = dtheta_max
-        self.margin_on = margin_on
-        self.margin_off = margin_off
-        self.engaged = False
+        self.margin = float(margin)     # in h*h_scale units
+        self.hold_ticks = int(hold_ticks)
         self.n_interventions = 0
+        self.n_switches = 0             # chatter diagnostic
         self.n_steps = 0
+        self._was_engaged = False
 
     @torch.no_grad()
-    def value(self, enc, Jlin, Jang):
-        """V(s) = min-twin Q under the deterministic actor."""
+    def q_nom(self, enc, a_nom, Jlin, Jang) -> torch.Tensor:
+        """Min-twin Q at the nominal action — the quantity being thresholded."""
+        return self.critics.qmin(enc, a_nom, Jlin, Jang, self.joint_index)
+
+    @torch.no_grad()
+    def q_actor(self, enc, Jlin, Jang) -> torch.Tensor:
+        """V(s) = min-twin Q under the deterministic safe actor (diagnostic)."""
         dtheta_pi, _, _ = self.actor(
             enc.body, self.joint_index, self.dtheta_max, deterministic=True
         )
         return self.critics.qmin(enc, dtheta_pi, Jlin, Jang, self.joint_index)
 
     @torch.no_grad()
-    def action(self, enc, Jlin, Jang, a_nom):
-        """Filtered action; tracks hysteresis state and intervention rate."""
-        self.n_steps += 1
+    def actor_action(self, enc) -> torch.Tensor:
+        """The safe actor's deterministic action for this tick."""
         dtheta_pi, _, _ = self.actor(
             enc.body, self.joint_index, self.dtheta_max, deterministic=True
         )
-        V = self.critics.qmin(enc, dtheta_pi, Jlin, Jang, self.joint_index)
-        v = float(V.item())
-        if not self.engaged and v < self.margin_on:
-            self.engaged = True
-        elif self.engaged and v > self.margin_off:
-            self.engaged = False
-        if self.engaged:
+        return dtheta_pi
+
+    def track(self, engaged: bool) -> None:
+        """Bookkeeping per tick: intervention rate and mode-switch count."""
+        self.n_steps += 1
+        if engaged:
             self.n_interventions += 1
-            return dtheta_pi, v, True
-        return a_nom, v, False
+        if engaged != self._was_engaged:
+            self.n_switches += 1
+        self._was_engaged = engaged
 
     @property
     def intervention_rate(self) -> float:

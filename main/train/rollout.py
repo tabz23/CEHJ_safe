@@ -1,30 +1,28 @@
-"""Rollout driver on PlanEveryKController: task-native execution with hooks.
+"""Rollout driver on TickChunkedController: vanilla nominal + per-tick hooks.
 
-The task's play_once owns the stage machine (grip timing, stage advance,
-check_success). PlanEveryKController makes it receding-horizon: plan,
-execute a window of k physics steps, replan from the LIVE qpos. This is
-the same env + controller stack as run.py --controller plan_play_once_everyk.
+The task's play_once owns the stage machine. TickChunkedController walks each
+cuRobo plan in fixed tick chunks (exactly PHYSICS_FREQ/control_freq physics
+steps — 10 at 25 Hz) and calls the per-tick hook at every boundary:
+
+  hook False -> play the next tick of plan rows (open-loop within the Action)
+  hook True  -> an intervention just drove the arm for hj_hold_ticks ticks
+                (actor re-queried every tick); the controller discards the
+                stale plan and replans the same target from live qpos.
+
+Filter trigger: Q(s, a_nom) < margin — the critic scores the NOMINAL's action
+for the upcoming tick (a_nom = pos[min(i_end, T-1)] - qpos_now, per arm),
+which is the textbook least-restrictive semantics.
 
 Modes:
+  filtered — deployment stack: filter active every tick.
+  collect  — dataset writes to a StepBuffer. If models are given AND
+             filter_active, the filter runs (DAgger rounds); otherwise the
+             nominal runs untouched and only commanded actions are recorded.
 
-  nominal   — plain receding-horizon rollout; per-tick h capture. If
-              actor/critics are given, V is evaluated (shadow, never
-              intervenes) at each window boundary.
-  filtered  — 5 Hz safety filter: each window is one 0.2 s filter period
-              (k=50 physics steps). Evaluate V at window start; if the
-              planned action is unsafe (V < margin), the safe actor drives
-              exactly this 0.2 s window; the next window replans from the
-              steered state.
-  collect   — nominal + per-tick dataset writes to a StepBuffer, with
-              random dtheta perturbations at window boundaries
-              (perturb_prob). dtheta stored per entry is the MEASURED
-              arm-joint displacement to the next entry (never commanded).
-
-Interleave points:
-
-  scene.step wrapper — per-control-tick obs/h capture (trace/video/buffer)
-  window boundary    — filtered mode: filter decision; collect mode:
-                       perturbation injection
+Capture: a scene.step hook records h/obs at every control tick (all stepping
+paths — plan chunks, actor ticks, perturbations — go through scene.step).
+The buffer's dtheta is the COMMANDED action per tick (planner a_nom, actor
+dtheta, or the sampled perturbation), with action_source marking which.
 """
 
 from __future__ import annotations
@@ -40,18 +38,21 @@ from main.train.hfunc import compute_h  # noqa: E402
 class RolloutTimeout(Exception):
     """Raised from the scene.step hook when max_steps physics steps pass."""
 
-
 EMBODIMENT_IDS = {"piper": 0, "franka-panda": 1, "ARX-X5": 2, "ur5-wsg": 3}
+
+# action_source values stored in the buffer
+SRC_PLANNER, SRC_ACTOR, SRC_PERTURB = 0, 1, 2
 
 
 class RolloutController:
-    """PlanEveryKController + per-tick capture + window-level filter."""
+    """TickChunkedController + per-tick capture + tick-level filter."""
 
-    def __init__(self, cfg, seed, mode="nominal", encoder=None, kin=None,
-                 policy_enc=None, actor=None, critics=None, k: int | None = None,
+    def __init__(self, cfg, seed, mode="filtered", encoder=None, kin=None,
+                 policy_enc=None, actor=None, critics=None,
+                 filter_active: bool = True,
                  buf=None, episode_id: int = 0, perturb_prob: float = 0.0,
-                 rng=None, video=None, max_steps: int = 2500):
-        from main.envs.controller import PlanEveryKController
+                 rng=None, video=None, max_steps: int = 4500):
+        from main.envs.controller import TickChunkedController
         from main.train.filter import SafetyFilter
 
         self.cfg = cfg
@@ -61,25 +62,29 @@ class RolloutController:
         self.kin = kin
         self.policy_enc = policy_enc
         self.mode = mode
-        self.k = int(k if k is not None else getattr(cfg, "replan_k", 60))
-        self.ctrl = PlanEveryKController(self.env, k=self.k)
+        self.ctrl = TickChunkedController(self.env)
         self.ctrl.attach()
+        self.ctrl.tick_hook = self._tick_hook
         self.buf = buf
         self.episode_id = int(episode_id)
         self.perturb_prob = float(perturb_prob)
         self.rng = rng if rng is not None else np.random.RandomState(0)
         self.video = video
-        self.video_fps = 10.0           # frames per SIM second (every 2nd tick)
+        self.video_fps = 10.0           # frames per SIM second (time-based)
         self._next_frame_t = 0.0
+        self._last_diag = None
         self.max_steps = int(max_steps)
         self._pending = None
         self._n_physics = 0
+        # commanded action + source for the CURRENT tick (read by
+        # _collect_tick when finalizing the pending entry)
+        self._n_act = 2 * self.extractor.spec.n_joints
+        self._tick_action = np.zeros(self._n_act, dtype=np.float64)
+        self._tick_source = SRC_PLANNER
 
         self.flt = None
+        self.filter_active = bool(filter_active)
         if actor is not None and critics is not None:
-            # built for filtered mode AND for nominal-mode shadow V.
-            # Margins are physical metres in the config; V lives in
-            # h*h_scale units, so scale the thresholds to match.
             hs = float(getattr(cfg, "h_scale", 1.0))
             self.flt = SafetyFilter(
                 actor, critics,
@@ -87,12 +92,94 @@ class RolloutController:
                 torch.from_numpy(
                     self.extractor.delta_theta_max.astype(np.float32)
                 ).cuda(),
-                margin_on=cfg.margin_on * hs, margin_off=cfg.margin_off * hs,
+                margin=float(getattr(cfg, "filter_margin", 0.01)) * hs,
+                hold_ticks=int(getattr(cfg, "hj_hold_ticks", 3)),
             )
         self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": []}
         self._tick_acc = 0.0
         self._orig_step = None
         self._last_ratio = 0.0
+
+    # ---------------- a_nom assembly ----------------
+    def _anom(self, ctx) -> torch.Tensor:
+        """Nominal's commanded displacement for the upcoming tick, per arm:
+        a_nom = pos[min(i_end, T-1)] - qpos_now — referenced to the LIVE qpos
+        (not the plan's start), so it is the same physical quantity as the
+        actor's dtheta. Arm-only rows; prismatic columns stay zero."""
+        from main.envs.controller import _path_arrays
+
+        i, spt = ctx["i"], self.ctrl.steps_per_tick
+        qraw = self.extractor.raw_qpos().astype(np.float64)
+        nj = self.extractor.spec.n_joints
+        n_arm = nj - 2  # spec order: arm joints, then the 2 prismatic
+        a = np.zeros(self._n_act, dtype=np.float64)
+        for arm_i, key in ((0, "left_arm"), (1, "right_arm")):
+            plan = ctx.get(key)
+            if plan is None:
+                continue
+            pos, _ = _path_arrays(plan)
+            i_end = min(i + spt - 1, len(pos) - 1)
+            a[arm_i * nj: arm_i * nj + n_arm] = (
+                pos[i_end] - qraw[arm_i * nj: arm_i * nj + n_arm]
+            )
+        return torch.from_numpy(a.astype(np.float32))[None].cuda()
+
+    # ---------------- per-tick hook ----------------
+    def _tick_hook(self, ctx) -> bool:
+        """Called by the controller at every tick boundary. Returns True iff
+        an intervention just drove the arm (controller then replans)."""
+        self._tick_source = SRC_PLANNER
+        self._tick_action = self._anom(ctx).cpu().numpy()[0].astype(np.float64)
+        if self.mode == "collect" and (self.flt is None or not self.filter_active):
+            # nominal-only collection episode: no filter, perturbation only
+            self._perturb_maybe()
+            return False
+        if self.flt is None or not self.filter_active:
+            return False
+
+        body, enc = self._model_inputs(self.env.get_encoder_obs())
+        a_nom_t = torch.from_numpy(self._tick_action.astype(np.float32))[None].cuda()
+        with torch.no_grad():
+            q_nom = float(self.flt.q_nom(
+                enc, a_nom_t, body["Jlin"][None].cuda(), body["Jang"][None].cuda()
+            ))
+        t_now = self._n_physics / self.env.PHYSICS_FREQ
+        self.trace["V_t"].append(t_now)
+        self.trace["V"].append(q_nom)
+        engaged = q_nom < self.flt.margin
+        self.trace["intervened"].append(engaged)
+        self.flt.track(engaged)
+        if not engaged:
+            return False
+
+        # intervention: actor drives hj_hold_ticks, re-queried every tick
+        for _ in range(self.flt.hold_ticks):
+            body, enc = self._model_inputs(self.env.get_encoder_obs())
+            with torch.no_grad():
+                a = self.flt.actor_action(enc)
+            a_np = a[0].cpu().numpy()
+            self._tick_source = SRC_ACTOR
+            self._tick_action = a_np.astype(np.float64)
+            self._last_ratio = float(
+                np.abs(a_np).max() / max(self.extractor.delta_theta_max.max(), 1e-9)
+            )
+            self.env.step_dtheta(a_np)
+        return True
+
+    def _perturb_maybe(self):
+        """Collection coverage: uniform random dtheta for one tick. Rate
+        matches the old per-window 5%: p_tick = perturb_prob * spt/60."""
+        spt = self.ctrl.steps_per_tick
+        if self.rng.rand() >= self.perturb_prob * (spt / 60.0):
+            return
+        ji = self.extractor.extract()["joint_index"].numpy().astype(np.int64)
+        cols = ji[ji >= 0]
+        dmax = np.asarray(self.extractor.delta_theta_max, dtype=np.float64)
+        dtheta = np.zeros(self._n_act)
+        dtheta[cols] = self.rng.uniform(-1, 1, len(cols)) * dmax[cols]
+        self._tick_source = SRC_PERTURB
+        self._tick_action = dtheta
+        self.env.step_dtheta(dtheta)
 
     # ---------------- capture ----------------
     def _capture_tick(self):
@@ -101,15 +188,14 @@ class RolloutController:
         # h is trained/evaluated in h*h_scale units (config keeps metres
         # for physical margins; see FrozenConfig.h_scale)
         h = float(h) * float(getattr(self.cfg, "h_scale", 1.0))
+        self._last_diag = diag
         t_now = self._n_physics / self.env.PHYSICS_FREQ
         self.trace["t"].append(t_now)
         self.trace["h"].append(float(h))
         if self.mode == "collect" and self.buf is not None:
             self._collect_tick(obs, h, diag)
         if self.video is not None and t_now >= self._next_frame_t - 1e-9:
-            # sim-time-based frame capture: 10 fps of simulation in BOTH
-            # nominal (20 Hz tick capture) and filtered (5 Hz window
-            # capture) modes
+            # sim-time-based frame capture: 10 fps of simulation
             self._next_frame_t = t_now + 1.0 / self.video_fps
             cam = self.env.task.cameras.observer_camera
             cam.take_picture()
@@ -117,15 +203,29 @@ class RolloutController:
             frame = (rgba * 255).clip(0, 255).astype(np.uint8)[:, :, :3]
             v_now = self.trace["V"][-1] if self.trace["V"] else float("nan")
             engaged = bool(self.trace["intervened"][-1]) if self.trace["intervened"] else False
+            from main.envs.controller import current_skill
+
+            extras = {
+                "d_left": diag.get("d_left"),
+                "d_right": diag.get("d_right"),
+                "d_left_held": diag.get("d_left_held"),
+                "d_right_held": diag.get("d_right_held"),
+                "true_argmin": diag.get("true_argmin", ""),
+                "holding": diag.get("holding", ""),
+                "skill": current_skill(self.env.task),
+            }
             self.video.add(
                 frame, t_now, len(self.trace["t"]), -1, float(h), v_now,
                 "FILTER" if engaged else "NOMINAL", self._last_ratio,
+                extras=extras,
             )
         return obs
 
     def _collect_tick(self, obs, h, diag):
         """Stash this state; the previous stashed entry is finalized with the
-        measured displacement to this one and written to the buffer.
+        COMMANDED action of the tick that led here (planner a_nom, actor
+        dtheta, or sampled perturbation — action_source marks which) and
+        written to the buffer.
 
         Cross-embodiment: variable-width fields are zero-padded to the
         buffer maxima (state tokens 16, action side 18). Jlin/Jang and
@@ -135,10 +235,12 @@ class RolloutController:
 
         with torch.no_grad():
             tokens, pos_mean, _ = self.encoder.encode_visual_tokens(
-                obs["imgs"], obs["depths"], obs["image_wh"], obs["projection_mat"]
+                obs["imgs"], obs["depths"], obs["image_wh"], obs["projection_mat"],
+                out_extrinsic=obs["T_ego2world"],  # ego -> world metres
             )
             state = self.encoder.encode_joint_angles(
-                obs["joint_state"], self.kin
+                obs["joint_state"], self.kin,
+                embodiedment_mat=obs["T_base2ego"],  # ego-frame FK (HoloBrain)
             ).squeeze(2)[0]
         body = self.extractor.extract()
         per_link = np.zeros(20, dtype=np.float32)
@@ -171,6 +273,9 @@ class RolloutController:
         Jlin_pad[:, :, : Jlin.shape[2]] = Jlin
         Jang_pad[:, :, : Jang.shape[2]] = Jang
 
+        dtheta_pad = np.zeros(MAX_ACTION, np.float32)
+        dtheta_pad[: self._tick_action.shape[0]] = self._tick_action
+
         entry = {
             "scene_tokens": tokens.flatten(1, 2)[0].cpu().half().numpy(),
             "scene_pos": pos_mean.flatten(1, 2)[0].cpu().numpy(),
@@ -185,6 +290,10 @@ class RolloutController:
             "body_mask": body["body_mask"].numpy(),
             "joint_index": body["joint_index"].numpy().astype(np.int8),
             "embodiment_id": np.int8(EMBODIMENT_IDS[self.cfg.embodiment]),
+            "task_id": np.int8(
+                list(self.cfg.task_choices).index(self.cfg.task)
+                if self.cfg.task in self.cfg.task_choices else -1
+            ),
             "h": np.float32(h),
             "per_link_h": per_link,
             "d_arm_arm": np.float32(diag["d_arm_arm"]),
@@ -192,24 +301,19 @@ class RolloutController:
             "done": np.bool_(False),
         }
         if self._pending is not None:
-            ji = self._pending["joint_index"].astype(np.int64)
-            valid = ji >= 0
-            # measured arm-joint displacement to the new state; action
-            # columns == raw qpos layout (both a*n_joint + k per spec)
-            delta = entry["qpos_raw"].astype(np.float64) - self._pending[
-                "qpos_raw"
-            ].astype(np.float64)
-            dtheta = np.zeros_like(delta)
-            dtheta[ji[valid]] = delta[ji[valid]]
-            self._pending["dtheta"] = dtheta.astype(np.float32)
+            # the pending entry's action = the action COMMANDED during the
+            # tick that produced this state (registered by the tick hook)
+            self._pending["dtheta"] = dtheta_pad
+            self._pending["action_source"] = np.int8(self._tick_source)
             self.buf.append(self._pending)
         self._pending = entry
 
     def _flush_pending(self):
         if self._pending is not None and self.buf is not None:
-            self._pending["dtheta"] = np.zeros_like(
-                self._pending["qpos_raw"], dtype=np.float32
-            )
+            from main.train.buffer import MAX_ACTION
+
+            self._pending["dtheta"] = np.zeros(MAX_ACTION, np.float32)
+            self._pending["action_source"] = np.int8(SRC_PLANNER)
             self._pending["done"] = np.bool_(True)
             self.buf.append(self._pending)
             self._pending = None
@@ -217,9 +321,13 @@ class RolloutController:
     def _model_inputs(self, obs):
         with torch.no_grad():
             tokens, pos_mean, _ = self.encoder.encode_visual_tokens(
-                obs["imgs"], obs["depths"], obs["image_wh"], obs["projection_mat"]
+                obs["imgs"], obs["depths"], obs["image_wh"], obs["projection_mat"],
+                out_extrinsic=obs["T_ego2world"],  # ego -> world metres
             )
-            state = self.encoder.encode_joint_angles(obs["joint_state"], self.kin).squeeze(2)
+            state = self.encoder.encode_joint_angles(
+                obs["joint_state"], self.kin,
+                embodiedment_mat=obs["T_base2ego"],
+            ).squeeze(2)
             body = self.extractor.extract()
             enc = self.policy_enc(
                 state, body["body_tokens"][None], body["link_pos"][None],
@@ -228,80 +336,10 @@ class RolloutController:
             )
         return body, enc
 
-    # ---------------- window-level hooks ----------------
-    def _filtered_play_seq(self, task, left_arm, right_arm, left_g, right_g,
-                           n_chunk, grip_i):
-        # obs for the MODEL at the window boundary; the trace/video capture
-        # runs independently in the per-tick scene.step hook (all modes)
-        obs = self.env.get_encoder_obs()
-        body, enc = self._model_inputs(obs)
-        with torch.no_grad():
-            action, V, engaged = self.flt.action(
-                enc, body["Jlin"][None], body["Jang"][None], None
-            )
-        self.trace["V_t"].append(self._n_physics / self.env.PHYSICS_FREQ)
-        self.trace["V"].append(float(V))
-        self.trace["intervened"].append(bool(engaged))
-        if engaged:
-            a = action[0].cpu().numpy()
-            self._last_ratio = float(
-                np.abs(a).max() / max(self.extractor.delta_theta_max.max(), 1e-9)
-            )
-            # drive the actor's action for exactly 0.2 s (4 control ticks)
-            for _ in range(max(1, round(int(n_chunk) / 12.5))):
-                self.env.step_dtheta(a)
-            return True
-        return self._orig_play_seq(
-            task, left_arm, right_arm, left_g, right_g, n_chunk, grip_i
-        )
-
-    def _shadow_play_seq(self, task, left_arm, right_arm, left_g, right_g,
-                         n_chunk, grip_i):
-        """Nominal window, but evaluate V at the window start (never act)."""
-        obs = self.env.get_encoder_obs()
-        body, enc = self._model_inputs(obs)
-        with torch.no_grad():
-            V = self.flt.value(enc, body["Jlin"][None], body["Jang"][None])
-        self.trace["V_t"].append(self._n_physics / self.env.PHYSICS_FREQ)
-        self.trace["V"].append(float(V))
-        self.trace["intervened"].append(False)
-        return self._orig_play_seq(
-            task, left_arm, right_arm, left_g, right_g, n_chunk, grip_i
-        )
-
-    def _collect_play_seq(self, task, left_arm, right_arm, left_g, right_g,
-                          n_chunk, grip_i):
-        """Nominal window; with prob perturb_prob first drive one tick of
-        uniform random arm displacement (the next window replans from the
-        disturbed state — coverage of off-nominal configurations)."""
-        if self.rng.rand() < self.perturb_prob:
-            ji = self.extractor.extract()["joint_index"].numpy().astype(np.int64)
-            cols = ji[ji >= 0]
-            dmax = np.asarray(self.extractor.delta_theta_max, dtype=np.float64)
-            dtheta = np.zeros(2 * self.extractor.spec.n_joints)
-            dtheta[cols] = self.rng.uniform(-1, 1, len(cols)) * dmax[cols]
-            # one control tick through env.step -> hooked capture fires
-            self.env.step_dtheta(dtheta)
-        return self._orig_play_seq(
-            task, left_arm, right_arm, left_g, right_g, n_chunk, grip_i
-        )
-
     # ---------------- main loop ----------------
     def run(self, max_steps: int | None = None):
-        from main.envs.controller import PlanEveryKController
-
         if max_steps is not None:
             self.max_steps = int(max_steps)
-        self._orig_play_seq = PlanEveryKController._play_seq.__get__(
-            self.ctrl, PlanEveryKController
-        )
-        if self.mode == "filtered" and self.flt is not None:
-            self.ctrl._play_seq = self._filtered_play_seq
-        elif self.mode == "nominal" and self.flt is not None:
-            self.ctrl._play_seq = self._shadow_play_seq
-        elif self.mode == "collect":
-            self.ctrl._play_seq = self._collect_play_seq
-
         self._orig_step = self.env.task.scene.step
         env = self.env
 
@@ -312,12 +350,10 @@ class RolloutController:
                 raise RolloutTimeout(
                     f"rollout exceeded {self.max_steps} physics steps"
                 )
-            # control_freq/PHYSICS_FREQ per physics step -> one capture per
-            # control tick (20 Hz), NOT per physics step
             self._tick_acc += env.control_freq / env.PHYSICS_FREQ
             if self._tick_acc >= 1.0:
                 self._tick_acc -= 1.0
-                self._capture_tick()  # per control tick (20 Hz), all modes
+                self._capture_tick()
 
         env.task.scene.step = hooked_step
         success = False
@@ -340,5 +376,7 @@ class RolloutController:
         if self.flt is not None:
             self.trace["interventions"] = self.flt.n_interventions
             self.trace["intervention_rate"] = self.flt.intervention_rate
+            self.trace["mode_switches"] = self.flt.n_switches
         env.close()
         return self.trace
+

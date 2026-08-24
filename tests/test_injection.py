@@ -31,7 +31,8 @@ def main() -> None:
 
     # ---- gather inputs ----
     obs = env.get_encoder_obs()
-    state_tokens = encoder.encode_joint_angles(obs["joint_state"], kin).squeeze(2)  # [1,14,256]
+    state_tokens = encoder.encode_joint_angles(obs["joint_state"], kin,
+                            embodiedment_mat=obs["T_base2ego"]).squeeze(2)  # [1,14,256]
     body = extractor.extract()
     B = 1
     body_tokens = body["body_tokens"][None]

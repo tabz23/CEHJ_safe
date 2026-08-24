@@ -31,6 +31,7 @@ CONTROLLER_NAMES = (
     "nominal",
     "vanilla_play_once",
     "plan_play_once_everyk",
+    "vanilla_tick",
 )
 
 
@@ -993,12 +994,151 @@ class PlanEveryKController(ResidualController):
                 right = nxt
 
 
+class TickChunkedController(ResidualController):
+    """Vanilla nominal with per-control-tick chunking and a filter hook.
+
+    Stock take_dense_action plays an entire cuRobo spline in one call. This
+    controller walks the plan in fixed tick chunks (PHYSICS_FREQ /
+    control_freq physics steps — exactly 10 at 25 Hz) and calls
+    self.tick_hook(ctx) at every tick boundary:
+
+      hook returns False -> play the next tick of plan rows
+      hook returns True  -> an intervention just drove the arm; the
+                            remaining waypoints are stale, so the plan is
+                            DISCARDED and replanned from live qpos to the
+                            same tagged target (forced _after_chunk
+                            semantics). The gripper clock is carried, not
+                            advanced, across the intervention.
+
+    ctx carries the live plan dicts, the row cursor, and the gripper
+    cursor so the hook can form a_nom = pos[min(i_end, T-1)] - qpos_now.
+    """
+
+    controller_name = "vanilla_tick"
+
+    def __init__(self, env: Env, **kw):
+        super().__init__(env, **kw)
+        self.tick_hook = None  # RolloutController sets this
+        self.n_interventions = 0
+
+    @property
+    def steps_per_tick(self) -> int:
+        return int(round(self.env.PHYSICS_FREQ / self.env.control_freq))
+
+    def attach(self) -> None:
+        super().attach()  # plan() routing + skill tracker
+        task = self.env.task
+        if getattr(task, "_cehj_tick_attached", False):
+            return
+        orig_take = task.take_dense_action
+        orig_left = task.left_move_to_pose
+        orig_right = task.right_move_to_pose
+        ctrl = self
+
+        def left_move_to_pose(pose, constraint_pose=None, **kw):
+            result = orig_left(pose, constraint_pose=constraint_pose, **kw)
+            return _tag_path(result, "left", pose, constraint_pose)
+
+        def right_move_to_pose(pose, constraint_pose=None, **kw):
+            result = orig_right(pose, constraint_pose=constraint_pose, **kw)
+            return _tag_path(result, "right", pose, constraint_pose)
+
+        def take_dense_action(control_seq, save_freq=-1):
+            return ctrl._tick_take_dense_action(orig_take, control_seq, save_freq)
+
+        task.left_move_to_pose = left_move_to_pose
+        task.right_move_to_pose = right_move_to_pose
+        task.take_dense_action = take_dense_action
+        task._cehj_tick_attached = True
+        print("[controller] vanilla_tick: tick-chunked, replan on intervention")
+
+    def _replan_arm(self, arm: str, plan: dict):
+        """Discard the stale plan; replan the same target from live qpos."""
+        target = plan.get("_cehj_target_pose")
+        constraint = plan.get("_cehj_constraint_pose")
+        self._count_next_plan_as_replan = True
+        new = self.plan(arm, target, constraint_pose=constraint)
+        self._count_next_plan_as_replan = False
+        if not _plan_ok(new) and constraint is not None:
+            new = self.plan(arm, target)
+        if not _plan_ok(new):
+            return None
+        return _tag_path(new, arm, target, constraint)
+
+    def _tick_take_dense_action(self, orig, control_seq, save_freq=-1):
+        task = self.env.task
+        left_arm = control_seq.get("left_arm")
+        right_arm = control_seq.get("right_arm")
+        left_g = control_seq.get("left_gripper")
+        right_g = control_seq.get("right_gripper")
+        if not _has_tag(left_arm) and not _has_tag(right_arm):
+            return orig(control_seq, save_freq)
+
+        spt = self.steps_per_tick
+        i = 0    # physics-step cursor into the arm plans
+        g_i = 0  # gripper row cursor (frozen during interventions)
+        while task.plan_success:
+            n_l = _n_wp(left_arm) if left_arm is not None else 0
+            n_r = _n_wp(right_arm) if right_arm is not None else 0
+            n_lg = 0 if left_g is None else max(0, int(left_g["num_step"]) - g_i)
+            n_rg = 0 if right_g is None else max(0, int(right_g["num_step"]) - g_i)
+            if i >= max(n_l, n_r) and max(n_lg, n_rg) <= 0:
+                break
+
+            if self.tick_hook is not None and (n_l > 0 or n_r > 0):
+                ctx = {
+                    "left_arm": left_arm, "right_arm": right_arm, "i": i,
+                    "left_g": left_g, "right_g": right_g, "g_i": g_i,
+                }
+                if self.tick_hook(ctx):
+                    # intervention: discard stale plans, replan from live qpos
+                    self.n_interventions += 1
+                    if left_arm is not None:
+                        left_arm = self._replan_arm("left", left_arm)
+                    if right_arm is not None:
+                        right_arm = self._replan_arm("right", right_arm)
+                    if (control_seq.get("left_arm") is not None and left_arm is None) or (
+                        control_seq.get("right_arm") is not None and right_arm is None
+                    ):
+                        task.plan_success = False
+                        return False
+                    i = 0  # the new plan starts at its own row 0
+                    continue
+
+            pos_l = vel_l = pos_r = vel_r = None
+            if left_arm is not None:
+                pos_l, vel_l = _path_arrays(left_arm)
+            if right_arm is not None:
+                pos_r, vel_r = _path_arrays(right_arm)
+            for k in range(spt):
+                row = i + k
+                if pos_l is not None and row < n_l:
+                    task.robot.set_arm_joints(pos_l[row], vel_l[row], "left")
+                if pos_r is not None and row < n_r:
+                    task.robot.set_arm_joints(pos_r[row], vel_r[row], "right")
+                if left_g is not None and g_i + k < int(left_g["num_step"]):
+                    task.robot.set_gripper(
+                        left_g["result"][g_i + k], "left", left_g["per_step"]
+                    )
+                if right_g is not None and g_i + k < int(right_g["num_step"]):
+                    task.robot.set_gripper(
+                        right_g["result"][g_i + k], "right", right_g["per_step"]
+                    )
+                task.scene.step()
+                if task.render_freq and row % task.render_freq == 0:
+                    task._update_render()
+            i += spt
+            g_i += spt
+        return True
+
+
 def controller_class(name: str):
     return {
         "residual": ResidualController,
         "nominal": CuroboIKController,
         "vanilla_play_once": VanillaPlayOnceController,
         "plan_play_once_everyk": PlanEveryKController,
+        "vanilla_tick": TickChunkedController,
     }[str(name)]
 
 
@@ -1012,6 +1152,8 @@ def make_controller(
     name = str(name)
     if name == "vanilla_play_once":
         return VanillaPlayOnceController(env)
+    if name == "vanilla_tick":
+        return TickChunkedController(env)
     if name == "plan_play_once_everyk":
         return PlanEveryKController(env, k=replan_k, replan_max=replan_max)
     if name == "nominal":
