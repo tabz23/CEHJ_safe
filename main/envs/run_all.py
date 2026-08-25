@@ -275,10 +275,8 @@ def _expand_jobs(args: argparse.Namespace) -> list[dict]:
 
 def _output_root(args: argparse.Namespace, job: dict) -> Path:
     root = Path(args.output).expanduser()
-    policies = _policies(args)
-    if len(policies) > 1:
-        return root / str(job.get("policy_dir") or job.get("controller") or "policy")
-    return root
+    policy = str(job.get("policy_dir") or job.get("controller") or "policy")
+    return root / policy
 
 
 def _job_out_dir(args: argparse.Namespace, job: dict) -> Path:

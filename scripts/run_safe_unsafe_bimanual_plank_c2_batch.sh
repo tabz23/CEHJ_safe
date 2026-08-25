@@ -47,7 +47,7 @@ python "${ROOT}/main/run_all.py" \
   --task-set bimanual \
   --tasks all \
   --embodiments aloha-agilex,piper,ARX-X5,franka-panda,ur5-wsg \
-  --obstacle-modes on_path \
+  --obstacle-modes on_path,off_path \
   --obstacle-model 068_boxdrink \
   --place-mode geometric \
   --plan-mode ignore_obstacle \
@@ -61,6 +61,7 @@ python "${ROOT}/main/run_all.py" \
   --output "${OUT_ROOT}" \
   "$@"
 
+
 python "${ROOT}/main/aggregate_plank.py" "${OUT_ROOT}"
 echo "Done. Compare ${OUT_ROOT}/latency_compare.csv"
 echo "Each scene ran vanilla then K=60 before the next scene."
@@ -71,7 +72,7 @@ echo "Each scene ran vanilla then K=60 before the next scene."
 #   --task-set bimanual \
 #   --tasks all \
 #   --embodiments aloha-agilex,piper,ARX-X5,franka-panda,ur5-wsg \
-#   --obstacle-modes on_path \
+#   --obstacle-modes on_path,off_path \
 #   --obstacle-model 068_boxdrink \
 #   --place-mode geometric \
 #   --plan-mode ignore_obstacle \

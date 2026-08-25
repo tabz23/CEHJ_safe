@@ -72,7 +72,7 @@ python "${ROOT}/main/run_all.py" \
   --task-set bimanual \
   --tasks all \
   --embodiments aloha-agilex,piper,ARX-X5,franka-panda,ur5-wsg \
-  --obstacle-modes on_path \
+  --obstacle-modes on_path,off_path \
   --obstacle-model 068_boxdrink \
   --place-mode geometric \
   --plan-mode ignore_obstacle \
@@ -82,8 +82,7 @@ python "${ROOT}/main/run_all.py" \
   --max-steps 5000 \
   --no-mpc-windows \
   --resume \
-  --controllers vanilla_play_once,plan_play_once_everyk \
-  --replan-ks 60 \
+  --controllers vanilla_play_once \
   --output "${OUT_ROOT}" \
   "$@"
 
