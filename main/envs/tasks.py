@@ -50,11 +50,13 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "object": "cup",
         "target": "coaster",
         "arm": "from_object_x",
+        "stretch_min": 0.36,
     },
     "move_can_pot": {
         "object": "can",
         "target": "pot",
         "arm": "from_object_x",
+        "stretch_min": 0.36,
     },
     "place_can_basket": {
         "object": "can",
@@ -62,7 +64,7 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "arm": "attr:arm_tag",
         "grasp_objects": ("can", "basket"),
         "corridors": (("can", "basket"),),
-        "stretch_min": 0.32,
+        "stretch_min": 0.36,
     },
     "place_container_plate": {
         "object": "container",
@@ -70,12 +72,13 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "arm": "from_object_x",
         "grasp_objects": ("container",),
         "corridors": (("container", "plate"),),
-        "stretch_min": 0.32,
+        "stretch_min": 0.40,
     },
     "place_shoe": {
         "object": "shoe",
         "target": "target_block",
         "arm": "from_object_x_inv",
+        "stretch_min": 0.36,
     },
     "stack_blocks_two": {
         "object": "block1",
@@ -83,18 +86,20 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "arm": "from_object_x_inv",
         "grasp_objects": ("block1", "block2"),
         "corridors": (("block1", "block1_target_pose"), ("block2", "block1_target_pose")),
-        "stretch_min": 0.32,
+        "stretch_min": 0.36,
         "bias_opposite": True,
     },
     "place_object_stand": {
         "object": "object",
         "target": "displaystand",
         "arm": "from_object_x",
+        "stretch_min": 0.36,
     },
     "place_mouse_pad": {
         "object": "mouse",
         "target": "target",
         "arm": "from_object_x",
+        "stretch_min": 0.36,
     },
     "click_bell": {
         "object": "bell",
@@ -112,7 +117,7 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "arm": "from_object_x",
         "grasp_objects": ("hamburg", "frenchfries"),
         "corridors": (("hamburg", "tray"), ("frenchfries", "tray")),
-        "stretch_min": 0.32,
+        "stretch_min": 0.36,
     },
     "place_cans_plasticbox": {
         "object": "object1",
@@ -120,7 +125,7 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "arm": "from_object_x",
         "grasp_objects": ("object1", "object2"),
         "corridors": (("object1", "plasticbox"), ("object2", "plasticbox")),
-        "stretch_min": 0.32,
+        "stretch_min": 0.36,
     },
     "place_bread_basket": {
         "object": "bread",
@@ -128,7 +133,7 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "arm": "from_object_x",
         "grasp_objects": ("bread",),
         "corridors": (("bread", "breadbasket"),),
-        "stretch_min": 0.32,
+        "stretch_min": 0.36,
         "bias_opposite": True,
     },
     "grab_roller": {
@@ -145,7 +150,7 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "arm": "left",
         "grasp_objects": ("bottle1", "bottle2"),
         "corridors": (("bottle1", "left_target_pose"), ("bottle2", "right_target_pose")),
-        "stretch_min": 0.22,
+        "stretch_min": 0.28,
     },
     "stack_bowls_two": {
         "object": "bowl1",
@@ -153,7 +158,7 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "arm": "from_object_x",
         "grasp_objects": ("bowl1", "bowl2"),
         "corridors": (("bowl1", "bowl1_target_pose"), ("bowl2", "bowl1_target_pose")),
-        "stretch_min": 0.22,
+        "stretch_min": 0.28,
         "bias_opposite": True,
     },
 }

@@ -113,7 +113,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--unsafe-level",
         default="2",
-        help="Ignored. Obstacle t is Uniform[0.3, 0.7] from the seed.",
+        help="Ignored. Obstacle t is Uniform[0.22, 0.48] from the seed (nearer the pick).",
     )
     parser.add_argument("--episodes", type=int, default=1, help="Different seeds / scenes per pair.")
     parser.add_argument("--base-seed", type=int, default=0)

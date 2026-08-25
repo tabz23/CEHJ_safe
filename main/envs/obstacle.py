@@ -88,9 +88,10 @@ def world_center_and_half(cfg: dict | None) -> tuple[np.ndarray, np.ndarray]:
         return center.astype(np.float64), extents.astype(np.float64)
     return (center * scale).astype(np.float64), (0.5 * extents * scale).astype(np.float64)
 
-# Placement t along object→target is sampled in [CORRIDOR_T_LO, CORRIDOR_T_HI] per seed.
-CORRIDOR_T_LO = 0.30
-CORRIDOR_T_HI = 0.70
+# Placement t along pick-object → place-target. Lower than 0.5 keeps the
+# drink nearer the grasped object so open/close at the place pose has room.
+CORRIDOR_T_LO = 0.22
+CORRIDOR_T_HI = 0.48
 UNSAFE_LEVEL = {
     1: {"t": 0.45, "off_path_m": 0.16},
     2: {"t": 0.55, "off_path_m": 0.22},
@@ -309,7 +310,7 @@ def _t_bounds(
     t_lo: float = CORRIDOR_T_LO,
     t_hi: float = CORRIDOR_T_HI,
 ) -> tuple[float, float, float]:
-    """Prefer t_pref in [0.3, 0.7]; snap to the nearest keepaway-free t in that range."""
+    """Prefer t_pref in [CORRIDOR_T_LO, CORRIDOR_T_HI]; snap to a keepaway-free t there."""
     lo, hi = float(t_lo), float(t_hi)
     blocked = _blocked_t_intervals(p0, p1, dist, keepaways, block_r)
     pref = float(np.clip(t_pref, lo, hi))
@@ -665,7 +666,7 @@ def keepaways_from_task(task, spec: dict) -> list[tuple[np.ndarray, float]]:
 
 
 STRETCH_XYLIM = np.array([[-0.36, 0.36], [-0.28, 0.14]], dtype=np.float64)
-TARGET_KEEPAWAY_CAP = 0.08
+TARGET_KEEPAWAY_CAP = 0.12
 PICK_KEEPAWAY_CAP = 0.10
 STRETCH_MIN_DEFAULT = 0.22
 STRETCH_PAIR_GAP = 0.10

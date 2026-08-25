@@ -32,7 +32,7 @@ class FrozenConfig:
                                         # gn_critic: targets 5x larger vs h_scale=20.
     obstacle_mode: str = "on_path"      # safety obstacle spawn mode for collection
     obstacle_t: float | None = None     # corridor t; None = sample per episode via
-                                        # run.py's _corridor_t(seed) in U[0.3, 0.7]
+                                        # run.py's _corridor_t(seed) in U[0.22, 0.48]
     off_path_frac: float = 0.2          # fraction of episodes with off_path obstacle
     filter_episode_frac: float = 0.8    # fraction of collection episodes with the filter
     h_include_payload: bool = True      # grasped object joins the body set after grasp

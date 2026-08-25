@@ -53,7 +53,8 @@ Params and options (also `python run.py --help`):
                       no_ignore_obstacle   : add the obstacle to CuRobo MotionGen and replan around it
 
   --unsafe-level      ignored (kept so old scripts still parse). Placement t is
-                      Uniform[0.3, 0.7] from the seed, same for none/off_path/on_path.
+                      Uniform[0.22, 0.48] from the seed, same for none/off_path/on_path
+                      (closer to the pick object than the place region).
 
   --arm               auto | left | right   (default: auto)
                       auto uses the same rule as the task expert.
@@ -104,6 +105,8 @@ from .controller import (
 )
 from .env import CEHJ_ROOT, DEFAULT_MSAA, RECORD_SIZE, Env
 from .obstacle import (
+    CORRIDOR_T_HI,
+    CORRIDOR_T_LO,
     OBSTACLE_MODEL,
     OBSTACLE_PRESETS,
     choose_and_spawn,
@@ -166,7 +169,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--unsafe-level",
         default="2",
-        help="Ignored. Obstacle t is Uniform[0.3, 0.7] from the seed.",
+        help="Ignored. Obstacle t is Uniform[0.22, 0.48] from the seed (nearer the pick).",
     )
     parser.add_argument("--arm", choices=("auto", "left", "right"), default="auto")
     parser.add_argument("--draw-bbox", action="store_true")
@@ -219,9 +222,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def _corridor_t(seed: int) -> float:
-    """Same t for none / off_path / on_path of one seed. Uniform in [0.3, 0.7]."""
+    """Same t for none / off_path / on_path of one seed.
+
+    Uniform in [CORRIDOR_T_LO, CORRIDOR_T_HI] on the pick→place segment
+    (biased toward the grasped object, away from the place region).
+    """
     rng = np.random.RandomState(int(seed) + 917)
-    return float(rng.uniform(0.30, 0.70))
+    return float(rng.uniform(CORRIDOR_T_LO, CORRIDOR_T_HI))
 
 
 def _t_tag(t: float) -> str:
