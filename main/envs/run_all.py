@@ -87,7 +87,7 @@ def parse_args() -> argparse.Namespace:
         "--task-set",
         choices=("safety", "bimanual"),
         default="safety",
-        help="Which list --tasks all uses. safety=10 original; bimanual=9 dual-arm.",
+        help="Which list --tasks all uses. safety=10 original; bimanual=8 dual-arm.",
     )
     parser.add_argument("--embodiments", default="all")
     parser.add_argument("--obstacle-modes", default="none,off_path,on_path")

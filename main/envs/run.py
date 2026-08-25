@@ -9,7 +9,7 @@ Params and options (also `python run.py --help`):
                       place_object_stand, place_mouse_pad, click_bell, press_stapler
                       Bimanual set: place_container_plate, place_burger_fries, place_cans_plasticbox,
                       stack_blocks_two, place_can_basket, place_bread_basket,
-                      grab_roller, pick_dual_bottles, stack_bowls_two
+                      pick_dual_bottles, stack_bowls_two
 
   --embodiment        Dual-arm robot (default: piper).
                       piper | franka | ur5 | arx | aloha

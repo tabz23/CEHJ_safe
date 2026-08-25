@@ -4,7 +4,7 @@
 # For each (task, embodiment, seed) we run vanilla then K=60 before the next
 # scene, so the comparison shares the same layout and a hot CuRobo cache.
 #
-# 9 bimanual tasks (place_container_plate first), × 5 embodiments
+# 8 bimanual tasks (place_container_plate first), × 5 embodiments
 # (aloha-agilex, piper, ARX-X5, franka-panda, ur5-wsg) × 4 seeds × 2 policies.
 # Embodiment is outer: Aloha runs every task starting with place_container_plate,
 # then piper, then the rest.

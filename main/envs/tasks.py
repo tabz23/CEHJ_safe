@@ -29,7 +29,6 @@ BIMANUAL_TASKS = (
     "stack_blocks_two",
     "place_can_basket",
     "place_bread_basket",
-    "grab_roller",
     "pick_dual_bottles",
     "stack_bowls_two",
 )
