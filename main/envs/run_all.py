@@ -44,6 +44,7 @@ ALIASES = {
     "franka": "franka-panda",
     "ur5": "ur5-wsg",
     "arx": "ARX-X5",
+    "aloha": "aloha-agilex",
 }
 
 

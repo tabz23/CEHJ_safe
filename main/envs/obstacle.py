@@ -102,6 +102,9 @@ COLLISION_YML = {
     "franka-panda": "franka-panda/collision_franka.yml",
     "ur5-wsg": "ur5-wsg/collision_wsg.yml",
     "ARX-X5": "ARX-X5/collision_X5A.yml",
+    # This file contains both fl_* and fr_* links. distance.py filters it by
+    # side for Aloha's single shared articulation.
+    "aloha-agilex": "aloha-agilex/collision_aloha_left.yml",
 }
 
 
@@ -547,13 +550,37 @@ def _table_world_dict(planner) -> dict:
     }
 
 
+def _aloha_obstacle_in_base(planner, p, q) -> tuple[np.ndarray, np.ndarray]:
+    """Apply RoboTwin's Aloha-only planner frame transform.
+
+    RoboTwin planner.py uses a rigid frame-bias transform plus a small,
+    side-specific yaw for Aloha targets. Applying the same transform here
+    keeps an obstacle in the same CuRobo frame as those targets.
+    """
+    import transforms3d as t3d
+
+    side_yaw = -0.01 if "curobo_right" in str(planner.yml_path) else -0.02
+    target = t3d.affines.compose(p, t3d.quaternions.quat2mat(q), [1, 1, 1])
+    bias = t3d.affines.compose(planner.frame_bias, np.eye(3), [1, 1, 1])
+    yaw = t3d.axangles.axangle2mat([0, 0, 1], side_yaw)
+    rotation = t3d.affines.compose([0, 0, 0], yaw, [1, 1, 1])
+    transformed = rotation @ bias @ target
+    return transformed[:3, 3], t3d.quaternions.mat2quat(transformed[:3, :3])
+
+
 def _obstacle_in_base(planner, xyz, quat, half) -> dict:
     origin = planner.robot_origion_pose
     base = np.concatenate([np.asarray(origin.p), np.asarray(origin.q)])
     world = np.concatenate([np.asarray(xyz, dtype=np.float64), np.asarray(quat, dtype=np.float64)])
     p, q = planner._trans_from_world_to_base(base, world)
-    bias = np.asarray(planner.frame_bias, dtype=np.float64)
-    p = np.asarray(p, dtype=np.float64) + bias
+    p = np.asarray(p, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+    if "aloha-agilex" in str(getattr(planner, "yml_path", "")):
+        p, q = _aloha_obstacle_in_base(planner, p, q)
+    else:
+        # Preserve the original transform exactly for all four existing
+        # embodiments.
+        p = p + np.asarray(planner.frame_bias, dtype=np.float64)
     dims = (2.0 * np.asarray(half, dtype=np.float64)).tolist()
     return {
         "dims": dims,

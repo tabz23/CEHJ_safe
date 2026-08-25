@@ -12,8 +12,8 @@ Params and options (also `python run.py --help`):
                       grab_roller, pick_dual_bottles, stack_bowls_two
 
   --embodiment        Dual-arm robot (default: piper).
-                      piper | franka | ur5 | arx
-                      ( Dual-arm Piper / Franka / UR5 / ARX )
+                      piper | franka | ur5 | arx | aloha
+                      (Aloha is the native bimanual aloha-agilex articulation.)
 
   --seed              Scene RNG. Same seed => same object poses. Change seed
                       (or use run_all.py) to get a new scene on reset.

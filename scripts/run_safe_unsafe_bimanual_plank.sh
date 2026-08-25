@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# Same-scene latency probe: vanilla play_once vs receding-horizon CuRobo (K=20,50,70).
+# Same-scene latency probe: vanilla play_once vs receding-horizon CuRobo (K=60).
 #
-# For each (task, embodiment, seed) we run vanilla then K=20,50,70 before the next
+# For each (task, embodiment, seed) we run vanilla then K=60 before the next
 # scene, so the comparison shares the same layout and a hot CuRobo cache.
 #
-# 8 bimanual tasks × 4 embodiments × 3 seeds × 4 policies.
-# Seed formula matches run_safe_unsafe_bimanual.sh (base-seed 12, episodes 3).
+# 8 bimanual tasks, including place_cans_plasticbox, × 5 embodiments
+# (ARX-X5, franka-panda, ur5-wsg, piper, aloha-agilex) × 4 seeds × 2 policies.
 #
 # Output (same relative episode path under each policy dir):
 #   CEHJ/outputs/ihab/safe_unsafe_bimanual_plank/
 #     vanilla_play_once/<task>/<emb>/on_path_geometric_ignore_obstacle_tXX_seedY/
-#     plan_everyk_k20/...
-#     plan_everyk_k50/...
-#     plan_everyk_k70/...
+#     plan_everyk_k60/...
 #     latency_compare.csv
 #
 # Interactive (inside robot-sim + rbtw128):
@@ -52,7 +50,7 @@
 
 set -euo pipefail
 ROOT="/storage1/fs1/sibai/Active/yuxuan/cross_embodiment/CEHJ"
-OUT_ROOT="${ROOT}/outputs/ihabnew/safe_unsafe_bimanual_plank_drinkobstacle"
+OUT_ROOT="${ROOT}/outputs/ihabnew/safe_unsafe_bimanual_drinkobstacle_testing_trajs"
 mkdir -p "${OUT_ROOT}/logs"
 
 export PYTHONNOUSERSITE=1
@@ -76,15 +74,14 @@ python "${ROOT}/main/run_all.py" \
   --obstacle-model 068_boxdrink \
   --place-mode geometric \
   --plan-mode ignore_obstacle \
-  --episodes 5 \
+  --episodes 4 \
   --base-seed 12 \
   --draw-bbox \
   --max-steps 4000 \
-  --mpc-window-max 3 \
-  --mpc-window-stride 400 \
+  --no-mpc-windows \
   --resume \
   --controllers vanilla_play_once,plan_play_once_everyk \
-  --replan-ks 80,75,70,50,40,30,20,10 \
+  --replan-ks 60 \
   --output "${OUT_ROOT}" \
   "$@"
 
@@ -92,5 +89,6 @@ python "${ROOT}/main/run_all.py" \
 
 python "${ROOT}/main/aggregate_plank.py" "${OUT_ROOT}"
 echo "Done. Compare ${OUT_ROOT}/latency_compare.csv"
-echo "Each scene ran vanilla then K=20,50,70 before the next scene."
-#--no-mpc-windows \
+echo "Each scene ran vanilla then K=60 before the next scene."
+  # --mpc-window-max 3 \
+  # --mpc-window-stride 400 \

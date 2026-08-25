@@ -33,6 +33,8 @@ ALIASES = {
     "arx": "ARX-X5",
     "arx-x5": "ARX-X5",
     "ARX-X5": "ARX-X5",
+    "aloha": "aloha-agilex",
+    "aloha-agilex": "aloha-agilex",
 }
 
 
@@ -681,6 +683,12 @@ class Env:
     def settle_arms(self, n_steps: int = 400) -> None:
         import numpy as np
 
+        # Aloha is a native bimanual/mobile articulation. Its RoboTwin
+        # homestate is already the task-ready pose; the mirrored arms cannot
+        # safely reuse a tabletop qpos from the separate-arm embodiments.
+        if self.embodiment == "aloha-agilex":
+            print(f"Keeping {self.embodiment} at RoboTwin homestate.")
+            return
         if self.embodiment == "ur5-wsg":
             print(f"Keeping {self.embodiment} at RoboTwin homestate.")
             return

@@ -108,12 +108,36 @@ def _finite_min(vals) -> float:
     return float(min(nums)) if nums else float("inf")
 
 
+ALOHA_LINK_PREFIXES = {
+    "left": ("fl_", "left_"),
+    "right": ("fr_", "right_"),
+}
+
+
+def _arm_collision_spheres(env, side: str, spheres: dict) -> dict:
+    """Return one arm's spheres for native bimanual Aloha only.
+
+    The four existing embodiments have separate left/right articulations and
+    intentionally keep receiving their original complete sphere dictionary.
+    Aloha has one articulation and one combined collision file, so each arm
+    must instead be selected by its fl_*/fr_* link prefix.
+    """
+    if getattr(env, "embodiment", "") != "aloha-agilex":
+        return spheres
+    prefixes = ALOHA_LINK_PREFIXES[side]
+    selected = {name: specs for name, specs in spheres.items() if name.startswith(prefixes)}
+    if not selected:
+        raise ValueError(f"No aloha-agilex {side} collision spheres found")
+    return selected
+
+
 def _arm_sphere_distance(env, side: str, origin, rot, half, spheres) -> tuple[float, str]:
     entity = env.robot.left_entity if side == "left" else env.robot.right_entity
     prefix = "L" if side == "left" else "R"
     best = float("inf")
     closest = ""
-    for center, radius, link_name in spheres_with_names(entity, spheres):
+    arm_spheres = _arm_collision_spheres(env, side, spheres)
+    for center, radius, link_name in spheres_with_names(entity, arm_spheres):
         d = point_obb_signed_distance(center, origin, rot, half) - radius
         if d < best:
             best = d
@@ -205,10 +229,12 @@ def distance_info(env) -> dict:
     return out
 
 
-def is_gripper_link(name: str) -> bool:
+def is_gripper_link(name: str, embodiment: str | None = None) -> bool:
     n = (name or "").lower()
     if n in ("link7", "link8"):
         return True
+    if embodiment == "aloha-agilex" and n.startswith(("fl_", "fr_")):
+        return n.rsplit("_", 1)[-1] in ("link7", "link8")
     return any(tag in n for tag in ("finger", "hand", "gripper", "robotiq"))
 
 
@@ -231,9 +257,12 @@ def spheres_with_names(entity, spheres: dict):
         links = entity.get_links()
     except Exception:
         links = []
+    embodiment = None
+    if any(name.startswith(("fl_", "fr_")) for name in seen):
+        embodiment = "aloha-agilex"
     for link in links:
         name = link.get_name() if hasattr(link, "get_name") else getattr(link, "name", "")
-        if not name or name in seen or not is_gripper_link(name):
+        if not name or name in seen or not is_gripper_link(name, embodiment):
             continue
         pose = _link_pose(link)
         out.append((np.asarray(pose.p, dtype=np.float64), 0.018, name))
@@ -290,11 +319,28 @@ def _iter_task_actors(env):
 
 
 def _entity_side_lookup(env) -> dict[int, str]:
-    """Map SAPIEN entity id → left/right. Link names repeat on both arms."""
+    """Map SAPIEN entity id → left/right."""
     cache = getattr(env, "_cehj_entity_side", None)
     if cache is not None:
         return cache
     cache: dict[int, str] = {}
+    if getattr(env, "embodiment", "") == "aloha-agilex":
+        # Aloha's left_entity and right_entity are the same articulation.
+        # Assign each link entity from its unambiguous fl_*/fr_* prefix.
+        for link in env.robot.left_entity.get_links():
+            name = link.get_name() if hasattr(link, "get_name") else getattr(link, "name", "")
+            side = next(
+                (candidate for candidate, prefixes in ALOHA_LINK_PREFIXES.items() if name.startswith(prefixes)),
+                None,
+            )
+            ent = getattr(link, "entity", None)
+            if side is not None and ent is not None:
+                cache[id(ent)] = side
+        env._cehj_entity_side = cache
+        return cache
+
+    # Preserve the original separate-articulation lookup for every existing
+    # embodiment.
     for side, art in (("left", env.robot.left_entity), ("right", env.robot.right_entity)):
         cache[id(art)] = side
         for link in art.get_links():
@@ -327,7 +373,7 @@ def _arm_is_holding(env, side: str) -> bool:
 def _is_gripper_entity(env, entity) -> bool:
     name = entity.name if hasattr(entity, "name") else ""
     gripper = set(getattr(env.robot, "gripper_name", []) or [])
-    return name in gripper or is_gripper_link(name)
+    return name in gripper or is_gripper_link(name, getattr(env, "embodiment", None))
 
 
 def _detect_held_from_contacts(env, items: list[tuple[str, object, set]]) -> dict[str, tuple]:
@@ -460,8 +506,11 @@ def _hold_metrics(env, actor, side: str) -> dict:
         out["tcp_obb"] = float(point_obb_signed_distance(tcp, origin, rot, half))
         entity = env.robot.left_entity if side == "left" else env.robot.right_entity
         grip = float("inf")
-        for center, radius, name in spheres_with_names(entity, load_collision_spheres(env.embodiment)):
-            if not is_gripper_link(name):
+        spheres = _arm_collision_spheres(
+            env, side, load_collision_spheres(env.embodiment)
+        )
+        for center, radius, name in spheres_with_names(entity, spheres):
+            if not is_gripper_link(name, env.embodiment):
                 continue
             d = point_obb_signed_distance(center, origin, rot, half) - radius
             if d < grip:

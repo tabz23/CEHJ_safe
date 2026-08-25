@@ -151,9 +151,15 @@ def draw_debug_bboxes(env, frame: np.ndarray) -> np.ndarray:
     except Exception:
         return img
     arm_i = 0
-    for entity in (env.robot.left_entity, env.robot.right_entity):
+    if env.embodiment == "aloha-agilex":
+        # Native Aloha stores both arms in one articulation and its combined
+        # collision file already contains fl_* and fr_* links.
+        entities = (env.robot.left_entity,)
+    else:
+        entities = (env.robot.left_entity, env.robot.right_entity)
+    for entity in entities:
         for center, radius, link_name in spheres_with_names(entity, spheres):
-            if is_gripper_link(link_name):
+            if is_gripper_link(link_name, env.embodiment):
                 img = _draw_cube(img, _project(cam, sphere_aabb_corners(center, radius)), (0, 220, 255))
                 continue
             if arm_i % 3 == 0:
