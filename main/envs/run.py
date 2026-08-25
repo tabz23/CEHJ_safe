@@ -7,7 +7,7 @@ Params and options (also `python run.py --help`):
                       Safety set: place_empty_cup, move_can_pot, place_can_basket,
                       place_container_plate, place_shoe, stack_blocks_two,
                       place_object_stand, place_mouse_pad, click_bell, press_stapler
-                      Bimanual set: place_burger_fries, place_cans_plasticbox,
+                      Bimanual set: place_container_plate, place_burger_fries, place_cans_plasticbox,
                       stack_blocks_two, place_can_basket, place_bread_basket,
                       grab_roller, pick_dual_bottles, stack_bowls_two
 
@@ -58,7 +58,8 @@ Params and options (also `python run.py --help`):
   --arm               auto | left | right   (default: auto)
                       auto uses the same rule as the task expert.
 
-  --draw-bbox         Also write debug_bbox.mp4 (CuRobo spheres + obstacle OBB).
+  --draw-bbox         Write only debug_bbox.mp4 (CuRobo spheres + obstacle OBB).
+                      Does not save agent_rgb / wrist RGB.
 
   --controller        residual | nominal | vanilla_play_once | plan_play_once_everyk
                       (default: residual; residual is 0 today)
@@ -393,9 +394,7 @@ def run_episode(args: argparse.Namespace) -> dict:
     elif args.controller == "plan_play_once_everyk":
         print("[run] MPC window clips disabled (--no-mpc-windows)")
 
-    streams = {"agent_rgb": [], "left_wrist_rgb": [], "right_wrist_rgb": []}
-    if args.draw_bbox:
-        streams["debug_bbox"] = []
+    streams = {"debug_bbox": []} if args.draw_bbox else {}
     overlay = {
         "obstacle_mode": args.obstacle_mode,
         "obstacle_model": getattr(args, "obstacle_model", OBSTACLE_MODEL),
@@ -463,7 +462,7 @@ def run_episode(args: argparse.Namespace) -> dict:
         f"success={success} plan_success={plan_success} "
         f"dL={d_left} dR={d_right} dLh={d_left_held} dRh={d_right_held} dmin={d_min} "
         f"contact={any_contact} held={held_labels[-1] if held_labels else None} "
-        f"frames={len(streams['agent_rgb'])} "
+        f"frames={len(streams.get('debug_bbox') or [])} "
         f"t_ep={clock.t_episode:.2f}s plan={clock.t_plan:.2f}s "
         f"(first={clock.t_plan_initial:.2f}s n={clock.n_plan_initial} "
         f"replan={clock.t_plan_replan:.2f}s n={clock.n_replan}) "
@@ -472,8 +471,11 @@ def run_episode(args: argparse.Namespace) -> dict:
     )
 
     outputs = {}
-    if streams["agent_rgb"]:
+    n_frames = len(streams.get("debug_bbox") or [])
+    if n_frames:
         for name, frames in streams.items():
+            if not frames:
+                continue
             t_vid = time.perf_counter()
             outputs[name] = str(save_video(frames, out_dir / f"{name}.mp4", args.fps))
             dt_vid = time.perf_counter() - t_vid
@@ -529,7 +531,7 @@ def run_episode(args: argparse.Namespace) -> dict:
         "videos": outputs,
         "hold_trace": hold_trace,
         "plans": str(plans_path),
-        "n_frames": len(streams["agent_rgb"]),
+        "n_frames": n_frames,
         "n_steps": rec.get("n", 0),
         "n_plans": clock.n_plan,
         "n_plan_ok": clock.n_plan_ok,

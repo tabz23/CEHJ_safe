@@ -4,8 +4,10 @@
 # For each (task, embodiment, seed) we run vanilla then K=60 before the next
 # scene, so the comparison shares the same layout and a hot CuRobo cache.
 #
-# 8 bimanual tasks, including place_cans_plasticbox, × 5 embodiments
-# (ARX-X5, franka-panda, ur5-wsg, piper, aloha-agilex) × 4 seeds × 2 policies.
+# 9 bimanual tasks (place_container_plate first), × 5 embodiments
+# (aloha-agilex, piper, ARX-X5, franka-panda, ur5-wsg) × 4 seeds × 2 policies.
+# Embodiment is outer: Aloha runs every task starting with place_container_plate,
+# then piper, then the rest.
 #
 # Output (same relative episode path under each policy dir):
 #   CEHJ/outputs/ihab/safe_unsafe_bimanual_plank/
@@ -69,15 +71,15 @@ python "${ROOT}/main/run_all.py" \
   --preset grid \
   --task-set bimanual \
   --tasks all \
-  --embodiments all \
+  --embodiments aloha-agilex,piper,ARX-X5,franka-panda,ur5-wsg \
   --obstacle-modes on_path \
   --obstacle-model 068_boxdrink \
   --place-mode geometric \
   --plan-mode ignore_obstacle \
-  --episodes 4 \
+  --episodes 5 \
   --base-seed 12 \
   --draw-bbox \
-  --max-steps 4000 \
+  --max-steps 5000 \
   --no-mpc-windows \
   --resume \
   --controllers vanilla_play_once,plan_play_once_everyk \

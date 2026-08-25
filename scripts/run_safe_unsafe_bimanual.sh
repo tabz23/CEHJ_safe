@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Bimanual safety episodes: 8 dual-arm tasks × 4 embodiments × 3 obstacle modes.
+# Bimanual safety episodes: 9 dual-arm tasks × 4 embodiments × 3 obstacle modes.
 # Same seed across none / off_path / on_path so the scene matches.
 #
-#   place_burger_fries, place_cans_plasticbox, stack_blocks_two, place_can_basket,
-#   place_bread_basket, grab_roller, pick_dual_bottles, stack_bowls_two
+#   place_container_plate, place_burger_fries, place_cans_plasticbox, stack_blocks_two,
+#   place_can_basket, place_bread_basket, grab_roller, pick_dual_bottles, stack_bowls_two
 #
-#   8 tasks × 4 embodiments × 3 modes = 96 episodes
+#   9 tasks × 4 embodiments × 3 modes = 108 episodes
 #   Obstacle t ~ Uniform[0.3, 0.7] from the seed (same t for none/off_path/on_path).
 #   embodiments (all): ARX-X5, franka-panda, ur5-wsg, piper
 #

@@ -23,6 +23,7 @@ SAFETY_TASKS = (
 )
 
 BIMANUAL_TASKS = (
+    "place_container_plate",
     "place_burger_fries",
     "place_cans_plasticbox",
     "stack_blocks_two",
@@ -36,10 +37,9 @@ BIMANUAL_TASKS = (
 ALL_TASKS = tuple(dict.fromkeys((*SAFETY_TASKS, *BIMANUAL_TASKS)))
 
 EMBODIMENTS = ("piper", "franka-panda", "ur5-wsg", "ARX-X5", "aloha-agilex")
-# run_all.py --embodiments all: ARX first (stable CuRobo), piper last (weakest IK).
-# Append Aloha so the four existing embodiments retain their sweep indices and
-# therefore their existing seeds and resumable output paths.
-SWEEP_EMBODIMENTS = ("ARX-X5", "franka-panda", "ur5-wsg", "piper", "aloha-agilex")
+# run_all.py --embodiments all: Aloha first, then piper, then the remaining arms.
+# Embodiment is the outer loop, so each robot finishes every task before the next.
+SWEEP_EMBODIMENTS = ("aloha-agilex", "piper", "ARX-X5", "franka-panda", "ur5-wsg")
 
 # object/target are attributes on the RoboTwin task instance after setup_demo.
 # arm: "from_object_x" | "from_object_x_inv" | "attr:<name>"
@@ -68,6 +68,9 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "object": "container",
         "target": "plate",
         "arm": "from_object_x",
+        "grasp_objects": ("container",),
+        "corridors": (("container", "plate"),),
+        "stretch_min": 0.32,
     },
     "place_shoe": {
         "object": "shoe",

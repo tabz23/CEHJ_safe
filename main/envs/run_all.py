@@ -87,7 +87,7 @@ def parse_args() -> argparse.Namespace:
         "--task-set",
         choices=("safety", "bimanual"),
         default="safety",
-        help="Which list --tasks all uses. safety=10 original; bimanual=8 dual-arm.",
+        help="Which list --tasks all uses. safety=10 original; bimanual=9 dual-arm.",
     )
     parser.add_argument("--embodiments", default="all")
     parser.add_argument("--obstacle-modes", default="none,off_path,on_path")
@@ -197,8 +197,8 @@ def _jobs(args: argparse.Namespace) -> list[dict]:
         extra_place = []
 
     jobs = []
-    # Embodiment outer (SWEEP_EMBODIMENTS: ARX → franka → ur5 → piper) so one
-    # robot's MotionGen stays hot; switching robots drops other CUDA graphs.
+    # Embodiment outer (SWEEP_EMBODIMENTS: Aloha → piper → ARX → franka → ur5)
+    # so one robot's MotionGen stays hot; switching robots drops other CUDA graphs.
     for ei, emb in enumerate(embs):
         for ti, task in enumerate(tasks):
             for ep in range(max(args.episodes, 1)):

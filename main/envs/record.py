@@ -408,12 +408,14 @@ def attach_recorder(
         state["contact"].append(info["contact"])
         if not recorded:
             return
+        if not draw_bbox:
+            return
+        streams.setdefault("debug_bbox", [])
+
         def _record_cameras():
-            obs = env.task.get_obs()["observation"]
             rgb = observer_rgb(env.task)
             rec_wh = getattr(env, "record_size", RECORD_SIZE)
-            debug = draw_debug_bboxes(env, rgb) if draw_bbox else None
-            rgb = to_record_size(rgb, rec_wh)
+            debug = draw_debug_bboxes(env, rgb)
 
             plan = overlay.get("plan_success")
             if plan is None:
@@ -454,13 +456,9 @@ def attach_recorder(
                 f"dmin={_cm(info['d_min'])} seed={overlay.get('seed')} expert={plan}",
                 ctrl_line,
             ]
-            streams["agent_rgb"].append(_put_text(rgb, lines))
-            if draw_bbox:
-                streams["debug_bbox"].append(_put_text(to_record_size(debug, rec_wh), lines))
-            streams["left_wrist_rgb"].append(np.asarray(obs["left_camera"]["rgb"], dtype=np.uint8))
-            streams["right_wrist_rgb"].append(np.asarray(obs["right_camera"]["rgb"], dtype=np.uint8))
+            streams["debug_bbox"].append(_put_text(to_record_size(debug, rec_wh), lines))
             print(
-                f"recorded {len(streams['agent_rgb'])} frames  "
+                f"recorded {len(streams['debug_bbox'])} frames  "
                 f"HOLD L={hold_l} R={hold_r} dmin={_cm(info['d_min'])}",
                 end="\r",
             )
@@ -468,7 +466,7 @@ def attach_recorder(
         if clock is not None:
             with clock.span("render"):
                 _record_cameras()
-            n_f = len(streams.get("agent_rgb") or [])
+            n_f = len(streams.get("debug_bbox") or [])
             if n_f and n_f % 50 == 0:
                 from main.timing import log_time
 

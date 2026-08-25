@@ -238,6 +238,22 @@ def is_gripper_link(name: str, embodiment: str | None = None) -> bool:
     return any(tag in n for tag in ("finger", "hand", "gripper", "robotiq"))
 
 
+def _aloha_side_from_spheres(spheres: dict) -> str | None:
+    """If `spheres` is already filtered to one Aloha arm, return that side.
+
+    Aloha is a single dual-arm articulation, so get_links() includes both
+    grippers. The missing-yml fallback must not attach the other arm's fingers.
+    Other embodiments keep mixed / unprefixed keys and return None.
+    """
+    has_l = any(k.startswith(("fl_", "left_")) for k in spheres)
+    has_r = any(k.startswith(("fr_", "right_")) for k in spheres)
+    if has_l and not has_r:
+        return "left"
+    if has_r and not has_l:
+        return "right"
+    return None
+
+
 def spheres_with_names(entity, spheres: dict):
     out = []
     seen = set()
@@ -260,9 +276,13 @@ def spheres_with_names(entity, spheres: dict):
     embodiment = None
     if any(name.startswith(("fl_", "fr_")) for name in seen):
         embodiment = "aloha-agilex"
+    aloha_side = _aloha_side_from_spheres(spheres)
+    aloha_prefix = ALOHA_LINK_PREFIXES.get(aloha_side) if aloha_side else None
     for link in links:
         name = link.get_name() if hasattr(link, "get_name") else getattr(link, "name", "")
         if not name or name in seen or not is_gripper_link(name, embodiment):
+            continue
+        if aloha_prefix is not None and not name.startswith(aloha_prefix):
             continue
         pose = _link_pose(link)
         out.append((np.asarray(pose.p, dtype=np.float64), 0.018, name))
