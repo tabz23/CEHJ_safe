@@ -88,7 +88,7 @@ TASK_SPECS: dict[str, dict[str, Any]] = {
         "stretch_min": 0.36,
         "bias_opposite": True,
         # Extra surface gap drink↔pick/place keepaways, Uniform meters.
-        "obstacle_bbox_gap": (0.04, 0.08),
+        "obstacle_bbox_gap": (0.02, 0.07),
     },
     "place_object_stand": {
         "object": "object",
