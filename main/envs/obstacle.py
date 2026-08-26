@@ -801,6 +801,13 @@ def choose_and_spawn(
         arm = arm_hint
     table_z = TABLE_Z + float(getattr(env.task, "table_z_bias", 0.0))
     task_keep = keepaways_from_task(env.task, spec)
+    gap_range = spec.get("obstacle_bbox_gap")
+    if gap_range is not None:
+        lo, hi = float(gap_range[0]), float(gap_range[1])
+        rng = np.random.RandomState(int(getattr(env, "seed", 0)) + 9183)
+        extra = float(rng.uniform(lo, hi))
+        task_keep = [(xy, float(r) + extra) for xy, r in task_keep]
+        print(f"[obstacle] bbox gap +{extra:.3f} m (task {env.task_name})")
     robot_keep = keepaways_from_robot(env)
     keep = task_keep + robot_keep
     t_pref = float(np.clip(corridor_t, CORRIDOR_T_LO, CORRIDOR_T_HI))

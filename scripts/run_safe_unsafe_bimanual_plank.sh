@@ -72,13 +72,14 @@ python "${ROOT}/main/run_all.py" \
   --task-set bimanual \
   --tasks all \
   --embodiments aloha-agilex,piper,ARX-X5,franka-panda,ur5-wsg \
-  --obstacle-modes on_path \
+  --obstacle-modes on_path,off_path \
   --obstacle-model 068_boxdrink \
   --place-mode geometric \
   --plan-mode ignore_obstacle \
-  --episodes 5 \
+  --episodes 6 \
   --base-seed 12 \
   --draw-bbox \
+  --record-every 40 \
   --max-steps 5000 \
   --no-mpc-windows \
   --resume \
