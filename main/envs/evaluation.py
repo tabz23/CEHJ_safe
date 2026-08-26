@@ -54,6 +54,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _observer_rgb(task) -> np.ndarray:
+    # sync the RT scene first — see record.observer_rgb
+    task.scene.update_render()
     cam = task.cameras.observer_camera
     cam.take_picture()
     rgba = cam.get_picture("Color")

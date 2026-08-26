@@ -64,6 +64,61 @@ def generate(src: Path, root_link: str, dst: Path):
     print(f"wrote {dst}")
 
 
+def split_by_prefix(src: Path, prefix: str, dst: Path):
+    """Single-arm URDF from a native dual-arm URDF: keep only the links and
+    joints whose names start with `prefix`, rooted at the first ACTUATED
+    prefixed joint's parent (e.g. aloha-agilex fl_*/fr_*). The prefixed
+    fixed mount joint above that parent (footprint -> fl_base_link) is
+    dropped so the pk FK root coincides with the SAPIEN arm-base link —
+    the body extractor composes FK with that link's world pose.
+    Kinematics only."""
+    src_root = ET.parse(src).getroot()
+    all_joints = [j for j in src_root.findall("joint")
+                  if j.get("name").startswith(prefix)
+                  and "wheel" not in j.get("name")
+                  and "castor" not in j.get("name")]
+    actuated = [j for j in all_joints
+                if j.get("type") in ("revolute", "prismatic")]
+    base_link = actuated[0].find("parent").get("link")
+    # drop the fixed mount joint(s) whose child is the base link
+    joints = [j for j in all_joints
+              if not (j.get("type") == "fixed"
+                      and j.find("child").get("link") == base_link)]
+    links = [el.get("name") for el in src_root.findall("link")
+             if el.get("name").startswith(prefix)]
+
+    robot = ET.Element("robot", {"name": f"{dst.stem}"})
+    ET.SubElement(robot, "link", {"name": base_link})
+    for name in links:
+        if name != base_link:
+            ET.SubElement(robot, "link", {"name": name})
+    for j in joints:
+        nj = ET.SubElement(robot, "joint", {"name": j.get("name"),
+                                            "type": j.get("type")})
+        for tag in ("origin", "axis", "limit"):
+            el = j.find(tag)
+            if el is not None:
+                ET.SubElement(nj, tag, dict(el.attrib))
+        ET.SubElement(nj, "parent", dict(j.find("parent").attrib))
+        ET.SubElement(nj, "child", dict(j.find("child").attrib))
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tree = ET.ElementTree(robot)
+    ET.indent(tree, space="  ")
+    tree.write(dst, xml_declaration=True, encoding="utf-8")
+    print(f"wrote {dst}")
+
+
+ALOHA_SRC = Path(
+    "/root/autodl-tmp/RoboTwin/assets/embodiments/aloha-agilex/urdf/"
+    "arx5_description_isaac.urdf"
+)
+
 if __name__ == "__main__":
     for fname, (src, root_link) in SPECS.items():
         generate(src, root_link, OUT / fname)
+    # aloha-agilex is a native dual-arm articulation: split per arm for the
+    # body-token extractor (the state encoder uses HoloBrain's
+    # DualArmKinematics on the full URDF instead)
+    split_by_prefix(ALOHA_SRC, "fl_", OUT / "aloha_agilex_left.urdf")
+    split_by_prefix(ALOHA_SRC, "fr_", OUT / "aloha_agilex_right.urdf")

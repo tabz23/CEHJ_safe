@@ -38,7 +38,8 @@ from main.train.hfunc import compute_h  # noqa: E402
 class RolloutTimeout(Exception):
     """Raised from the scene.step hook when max_steps physics steps pass."""
 
-EMBODIMENT_IDS = {"piper": 0, "franka-panda": 1, "ARX-X5": 2, "ur5-wsg": 3}
+EMBODIMENT_IDS = {"piper": 0, "franka-panda": 1, "ARX-X5": 2,
+                 "ur5-wsg": 3, "aloha-agilex": 4}
 
 # action_source values stored in the buffer
 SRC_PLANNER, SRC_ACTOR, SRC_PERTURB = 0, 1, 2
@@ -137,7 +138,7 @@ class RolloutController:
         if self.flt is None or not self.filter_active:
             return False
 
-        body, enc = self._model_inputs(self.env.get_encoder_obs())
+        body, enc = self._model_inputs(self.env.get_encoder_obs(self.kin))
         a_nom_t = torch.from_numpy(self._tick_action.astype(np.float32))[None].cuda()
         with torch.no_grad():
             q_nom = float(self.flt.q_nom(
@@ -154,7 +155,7 @@ class RolloutController:
 
         # intervention: actor drives hj_hold_ticks, re-queried every tick
         for _ in range(self.flt.hold_ticks):
-            body, enc = self._model_inputs(self.env.get_encoder_obs())
+            body, enc = self._model_inputs(self.env.get_encoder_obs(self.kin))
             with torch.no_grad():
                 a = self.flt.actor_action(enc)
             a_np = a[0].cpu().numpy()
@@ -183,7 +184,7 @@ class RolloutController:
 
     # ---------------- capture ----------------
     def _capture_tick(self):
-        obs = self.env.get_encoder_obs()
+        obs = self.env.get_encoder_obs(self.kin)
         h, diag = compute_h(self.env, self.cfg.table_margin, self.cfg.table_height)
         # h is trained/evaluated in h*h_scale units (config keeps metres
         # for physical margins; see FrozenConfig.h_scale)

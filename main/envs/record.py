@@ -24,6 +24,10 @@ class EpisodeStepTimeout(Exception):
 
 
 def observer_rgb(task) -> np.ndarray:
+    # sync the RT scene first: with ray tracing, take_picture alone renders
+    # the renderer's own (stale) copy of the world — poses since the last
+    # sync are invisible and frames flash when the arm moves fast
+    task.scene.update_render()
     cam = task.cameras.observer_camera
     cam.take_picture()
     rgba = cam.get_picture("Color")

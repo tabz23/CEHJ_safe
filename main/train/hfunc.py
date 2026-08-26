@@ -45,13 +45,25 @@ def _arm_spheres(env):
 
     Static mount links (base_link) are excluded — their clearance to the
     table is a constant that would dominate the min and make h constant.
-    """
-    from main.network.body_features import get_arm_spec
 
-    spec = get_arm_spec(env.robot.left_urdf_path)
-    allowed = set(spec.link_names)
-    spheres = load_collision_spheres(env.embodiment)
-    for side, entity in (("L", env.robot.left_entity), ("R", env.robot.right_entity)):
+    aloha-agilex is a native dual-arm articulation: per-arm split-URDF
+    specs (arm_spec_paths) plus the side-prefixed sphere selection from
+    distance.py (_arm_collision_spheres).
+    """
+    from main.network.body_features import arm_spec_paths, get_arm_spec
+    from main.envs.distance import _arm_collision_spheres
+
+    left_path, right_path = arm_spec_paths(env)
+    spheres_all = load_collision_spheres(env.embodiment)
+    for side, entity, path in (
+        ("L", env.robot.left_entity, left_path),
+        ("R", env.robot.right_entity, right_path),
+    ):
+        spec = get_arm_spec(path)
+        allowed = set(spec.link_names)
+        spheres = _arm_collision_spheres(
+            env, "left" if side == "L" else "right", spheres_all
+        )
         for center, radius, link_name in spheres_with_names(entity, spheres):
             if link_name in allowed:
                 yield f"{side}/{link_name}", np.asarray(center), float(radius)
@@ -84,7 +96,10 @@ def compute_h(env, table_margin: float = 0.01, table_height: float = TABLE_HEIGH
                 env.obstacle, getattr(env, "obstacle_half", None)
             )
             best = point_obb_signed_distance(center, origin, rot, half) - radius
-        per_link[label] = best
+        # a link has MULTIPLE collision spheres — keep the MIN per link
+        # (a plain assignment keeps only the last sphere and overstates
+        # per_link, breaking the true_argmin diagnostic)
+        per_link[label] = min(per_link.get(label, float("inf")), best)
 
     # --- arm-to-arm distance (diagnostic only; NOT in h) ---
     d_arm_arm = float("inf")

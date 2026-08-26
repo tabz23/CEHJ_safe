@@ -400,35 +400,45 @@ class Env:
     def get_obs(self):
         return self.task.get_obs()
 
-    def compute_T_base2world(self) -> "np.ndarray":
-        """Kinematics root frame (dual-arm URDF base_link) in world [4, 4].
+    def compute_T_base2world(self, kin) -> "np.ndarray":
+        """Kinematics root frame (dual-arm URDF base frame) in world [4, 4].
 
-        The HoloBrain dual-arm URDFs use the UNROTATED base frame (RoboTwin
-        mounts piper/franka/arx with a +90 deg z robot_pose that the ckpt
-        URDFs do not carry), so the root fix is Rz(-90). ur5's ckpt dual
-        URDF (identity mount rotation) instead offsets the left arm by
-        (-0.4, 0, 0) from base_link. Both verified by FK alignment against
-        SAPIEN link poses (measured piper: R_diff = Rz(-90) exactly).
-        Cached.
+        Empirical FK alignment at the FIRST left-arm link: the HoloBrain
+        dual-arm URDFs and the RoboTwin sim URDF share the physical arm
+        kinematics but differ in base-frame convention (ckpt URDFs carry no
+        mount rotation; ur5's ckpt URDF offsets the left arm by (-0.4,0,0)),
+        so we solve the root transform instead of hand-coding it per
+        embodiment. Measured on piper: exactly Rz(-90) vs the SAPIEN base
+        link. Cached.
         """
         import numpy as np
+        import torch
 
         if getattr(self, "_T_base2world", None) is not None:
             return self._T_base2world
-        from main.network.body_features import get_arm_spec
-
-        spec = get_arm_spec(self.robot.left_urdf_path)
-        links = {l.get_name(): l for l in self.robot.left_entity.get_links()}
-        p = links[spec.base_link].get_pose()
-        T = np.eye(4)
-        T[:3, :3] = _quat_wxyz_to_rot(np.asarray(p.q, dtype=np.float64))
-        T[:3, 3] = np.asarray(p.p, dtype=np.float64)
-        fix = np.eye(4)
-        if self.embodiment == "ur5-wsg":
-            fix[:3, 3] = [0.4, 0.0, 0.0]
+        js = torch.tensor(
+            [self.robot.get_left_arm_real_jointState()
+             + self.robot.get_right_arm_real_jointState()],
+            dtype=torch.float32,
+        )
+        mats = kin.joint_state_to_robot_state(js, return_matrix=True)
+        fk0 = mats.reshape(-1, 4, 4)[0].double().numpy()  # first left-arm link
+        if hasattr(kin, "arm_link_keys"):
+            key0 = kin.arm_link_keys[0][0]
         else:
-            fix[:3, :3] = [[0, 1, 0], [-1, 0, 0], [0, 0, 1]]  # Rz(-90)
-        self._T_base2world = T @ fix
+            key0 = kin.left_arm_link_keys[0]
+        links = {l.get_name(): l for l in self.robot.left_entity.get_links()}
+        candidates = [key0]
+        for pre in ("left_", "right_"):
+            if key0.startswith(pre):
+                candidates.append(key0[len(pre):])
+        name = next((c for c in candidates if c in links), None)
+        assert name is not None, f"no SAPIEN link matching {key0!r}"
+        p = links[name].get_pose()
+        T_wl = np.eye(4)
+        T_wl[:3, 3] = np.asarray(p.p, dtype=np.float64)
+        T_wl[:3, :3] = _quat_wxyz_to_rot(np.asarray(p.q, dtype=np.float64))
+        self._T_base2world = T_wl @ np.linalg.inv(fk0)
         return self._T_base2world
 
     # HoloBrain GD image normalization (0-255 scale)
@@ -450,7 +460,7 @@ class Env:
             ext = np.vstack([ext, [0.0, 0.0, 0.0, 1.0]])
         return ext
 
-    def get_encoder_obs(self) -> dict:
+    def get_encoder_obs(self, kin=None) -> dict:
         """Observation bundle matching HoloBrain's own inference pipeline.
 
         Parity with HoloBrain's deploy transforms (robotwin2_0_ur5_wsg
@@ -535,7 +545,8 @@ class Env:
             proj[:3, :4] = K @ ext_c_to_ego[:3]
             projs[i] = proj
 
-        T_base2ego = ext_head @ self.compute_T_base2world()
+        T_base2ego = (ext_head @ self.compute_T_base2world(kin)
+                      if kin is not None else None)
 
         imgs = np.stack(rgbs)[None].astype(np.float32)
         imgs = (imgs - np.array(self.ENCODER_IMG_MEAN)) / np.array(self.ENCODER_IMG_STD)
