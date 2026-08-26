@@ -34,7 +34,7 @@ def main() -> None:
     actor = TokenActor().cuda().eval()
 
     # ---- full pipeline to trunk output ----
-    obs = env.get_encoder_obs()
+    obs = env.get_encoder_obs(kin)
     state_tokens = encoder.encode_joint_angles(obs["joint_state"], kin,
                             embodiedment_mat=obs["T_base2ego"]).squeeze(2)
     tokens, pos_mean, _ = encoder.encode_visual_tokens(

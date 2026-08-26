@@ -320,7 +320,10 @@ class HoloBrainEncoder(nn.Module):
         # with the FK pose channels) and the gripper scalar normalized
         # (g - 0.5) / 0.5 -> [-1, 1] (both processor JSONs use [0.5, 0.5]
         # on the gripper entries).
-        n_arm = len(kinematics.arm_link_keys[0])
+        arm_keys = getattr(kinematics, "arm_link_keys", None) or [
+            kinematics.left_arm_link_keys, kinematics.right_arm_link_keys
+        ]
+        n_arm = len(arm_keys[0])
         n_per_arm = n_arm + 1
         n_link = robot_state.shape[-2]
         assert n_link == 2 * n_per_arm, (

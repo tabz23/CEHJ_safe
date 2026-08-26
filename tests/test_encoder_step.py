@@ -68,7 +68,7 @@ def main() -> None:
     encoder = HoloBrainEncoder(str(args.ckpt), device="cuda")
     kin = make_piper_kinematics(args.ckpt)
 
-    obs = env.get_encoder_obs()
+    obs = env.get_encoder_obs(kin)
     assert obs["camera_names"] == ["left_wrist", "right_wrist", "head"]
     w, h = obs["image_wh"][0].tolist()
     print(f"obs: {len(obs['camera_names'])} cams at {w}x{h} (ego = head, LAST)")

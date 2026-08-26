@@ -1,0 +1,70 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="aloha_agilex_right">
+  <link name="fr_base_link" />
+  <link name="fr_castor_link" />
+  <link name="fr_wheel_link" />
+  <link name="fr_link1" />
+  <link name="fr_link2" />
+  <link name="fr_link3" />
+  <link name="fr_link4" />
+  <link name="fr_link5" />
+  <link name="fr_link6" />
+  <link name="fr_link7" />
+  <link name="fr_link8" />
+  <joint name="fr_joint1" type="revolute">
+    <origin xyz="0 0 0.058" rpy="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit lower="-10" upper="10" effort="100" velocity="1000" />
+    <parent link="fr_base_link" />
+    <child link="fr_link1" />
+  </joint>
+  <joint name="fr_joint2" type="revolute">
+    <origin xyz="0.025013 0.00060169 0.042" rpy="0 0 0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-10" upper="10" effort="100" velocity="1000" />
+    <parent link="fr_link1" />
+    <child link="fr_link2" />
+  </joint>
+  <joint name="fr_joint3" type="revolute">
+    <origin xyz="-0.26396 0.0044548 0" rpy="-3.1416 0 -0.015928" />
+    <axis xyz="0 1 0" />
+    <limit lower="-10" upper="10" effort="100" velocity="1000" />
+    <parent link="fr_link2" />
+    <child link="fr_link3" />
+  </joint>
+  <joint name="fr_joint4" type="revolute">
+    <origin xyz="0.246 -0.00025 -0.06" rpy="0 0 0" />
+    <axis xyz="0 1 0" />
+    <limit lower="-10" upper="10" effort="100" velocity="1000" />
+    <parent link="fr_link3" />
+    <child link="fr_link4" />
+  </joint>
+  <joint name="fr_joint5" type="revolute">
+    <origin xyz="0.06775 0.0015 -0.0855" rpy="0 0 -0.015928" />
+    <axis xyz="0 0 1" />
+    <limit lower="-10" upper="10" effort="100" velocity="1000" />
+    <parent link="fr_link4" />
+    <child link="fr_link5" />
+  </joint>
+  <joint name="fr_joint6" type="revolute">
+    <origin xyz="0.03095 0 0.0855" rpy="-3.1416 0 0" />
+    <axis xyz="1 0 0" />
+    <limit lower="-10" upper="10" effort="100" velocity="1000" />
+    <parent link="fr_link5" />
+    <child link="fr_link6" />
+  </joint>
+  <joint name="fr_joint7" type="prismatic">
+    <origin xyz="0.08457 0.024493 -0.00010349" rpy="0 0 0" />
+    <axis xyz="0 1 0" />
+    <limit lower="0" upper="0.04765" effort="100" velocity="1000" />
+    <parent link="fr_link6" />
+    <child link="fr_link7" />
+  </joint>
+  <joint name="fr_joint8" type="prismatic">
+    <origin xyz="0.08457 -0.024496 -0.00010354" rpy="0 0 0" />
+    <axis xyz="0 -1 0" />
+    <limit lower="0" upper="0.04765" effort="100" velocity="1000" />
+    <parent link="fr_link6" />
+    <child link="fr_link8" />
+  </joint>
+</robot>

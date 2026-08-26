@@ -52,6 +52,17 @@ def make_kinematics(ckpt_dir: Path, embodiment: str = "piper"):
     )
 
     assets = Path(__file__).resolve().parents[2] / "assets" / "urdf"
+    if embodiment == "aloha-agilex":
+        # HoloBrain's own robotwin2_0 processor uses DualArmKinematics on
+        # this exact URDF (fl_/fr_ links) — natural parity, defaults are the
+        # aloha layout (arm joints 10-15/18-23, fingers merged per arm)
+        from robo_orchard_lab.dataset.robotwin.transforms import (
+            DualArmKinematics,
+        )
+
+        return DualArmKinematics(
+            urdf=str(ckpt_dir / "urdf" / "arx5_description_isaac.urdf")
+        )
     if embodiment == "franka-panda":
         return MultiArmKinematics(
             urdf=str(assets / "franka_panda_dualarm.urdf"),

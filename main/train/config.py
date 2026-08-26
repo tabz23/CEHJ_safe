@@ -48,7 +48,8 @@ class FrozenConfig:
         "stack_blocks_two", "stack_bowls_two", "place_burger_fries",
         "place_bread_basket", "place_can_basket",
     )
-    embodiment_choices: tuple = ("piper", "franka-panda", "ARX-X5", "ur5-wsg")
+    embodiment_choices: tuple = ("piper", "franka-panda", "ARX-X5", "ur5-wsg",
+                             "aloha-agilex")
     obstacle_choices: tuple = ("068_boxdrink",)
     randomize_scenes: bool = True       # sample triples per episode/eval
     hj_hold_ticks: int = 3              # filter intervention block, control ticks (0.12 s)

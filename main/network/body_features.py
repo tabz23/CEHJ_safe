@@ -46,6 +46,8 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import torch
 
+from pathlib import Path
+
 logger = logging.getLogger(__name__)
 
 LIN_VEL_SCALE = 0.5          # global constant, NOT per-embodiment
@@ -165,6 +167,21 @@ def _parse_urdf_joints(urdf_path: str) -> tuple[list[dict], str]:
     if len(ordered) != len(joints):
         raise ValueError("URDF tree walk did not cover all actuated joints")
     return ordered, base
+
+
+def arm_spec_paths(env) -> tuple[str, str]:
+    """Per-arm URDF paths for ArmChainSpec.
+
+    aloha-agilex is a native dual-arm articulation (one URDF, one entity,
+    fl_*/fr_* links): the body extractor and h use per-arm split URDFs
+    (tests/gen_franka_dualarm_urdf.py). All other embodiments have one
+    URDF per arm already.
+    """
+    if getattr(env, "embodiment", "") == "aloha-agilex":
+        assets = Path(__file__).resolve().parents[2] / "assets" / "urdf"
+        return (str(assets / "aloha_agilex_left.urdf"),
+                str(assets / "aloha_agilex_right.urdf"))
+    return (env.robot.left_urdf_path, env.robot.right_urdf_path)
 
 
 class ArmChainSpec:
@@ -309,11 +326,10 @@ class BodyTokenExtractor:
         )
         self.kappa = float(kappa)
 
-        # one spec per arm (hash-cached, so identical URDFs share an object)
-        self.specs = [
-            get_arm_spec(env.robot.left_urdf_path),
-            get_arm_spec(env.robot.right_urdf_path),
-        ]
+        # one spec per arm (hash-cached, so identical URDFs share an object;
+        # aloha-agilex gets per-arm split URDFs — see arm_spec_paths)
+        left_path, right_path = arm_spec_paths(env)
+        self.specs = [get_arm_spec(left_path), get_arm_spec(right_path)]
         self.spec = self.specs[0]  # convenience alias (chain layout)
         for spec in self.specs:
             if spec.n_joints != self.spec.n_joints or len(spec.link_names) != len(self.spec.link_names):
