@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -33,10 +34,12 @@ if __package__ in (None, ""):
 CEHJ_ROOT = Path(__file__).resolve().parents[2]
 
 from main.train.buffer import StepBuffer  # noqa: E402
-from main.train.config import FrozenConfig  # noqa: E402
+from main.train.config import FrozenConfig, apply_embodiment_selection  # noqa: E402
 from main.network.encoder import HoloBrainEncoder  # noqa: E402
 
-CKPT_DIR = Path("/root/autodl-tmp/HoloBrain/HoloBrain_v0.0_GD")
+CKPT_DIR = Path(
+    os.environ.get("HOLOBRAIN_CKPT", "/root/autodl-tmp/HoloBrain/HoloBrain_v0.0_GD")
+)
 
 
 def make_kinematics(ckpt_dir: Path, embodiment: str = "piper"):
@@ -155,8 +158,9 @@ def make_training_env(cfg: FrozenConfig, seed: int, control_freq: float = 25.0):
 
 def episode_schedule(cfg: FrozenConfig, n_episodes: int, seed: int = 0):
     """Fixed cyclic schedule over the shuffled (task, embodiment) product —
-    every combination appears floor(n/20) times, so counts are exactly
-    balanced (IID sampling leaves the 20 combos badly unbalanced)."""
+    every one of the len(task_choices) x len(embodiment_choices)
+    combinations appears floor(n / n_combos) times, so counts are exactly
+    balanced (IID sampling leaves the combos badly unbalanced)."""
     import itertools
 
     combos = list(itertools.product(
@@ -185,9 +189,41 @@ def sample_scene(cfg: FrozenConfig, rng: np.random.RandomState,
     )
 
 
+def _load_follow_models(ckpt_path: Path, built: dict | None = None,
+                        cfg: "FrozenConfig | None" = None) -> tuple:
+    """Build (once) and (re)load policy modules from a training checkpoint —
+    the --follow side of async online collection."""
+    from main.network.encoder import RobotInjection
+    from main.network.heads import PolicyEncoder, TokenActor, TwinCritic
+    from main.network.trunk import GeometricTrunk
+
+    if built is None:
+        # softmin temperature must MATCH training (train.py scales the
+        # config's physical metres by h_scale); it is a plain attribute,
+        # not part of the state_dict, so loading cannot fix a wrong value
+        T = (float(cfg.softmin_T) * float(getattr(cfg, "h_scale", 1.0))
+             if cfg is not None else 0.02)
+        injection = RobotInjection().cuda().eval()
+        trunk = GeometricTrunk().cuda().eval()
+        built = {
+            "policy_enc": PolicyEncoder(injection, trunk).cuda().eval(),
+            "actor": TokenActor().cuda().eval(),
+            "critics": TwinCritic(temperature=T).cuda().eval(),
+        }
+    ckpt = torch.load(ckpt_path, map_location="cuda", weights_only=True)
+    built["policy_enc"].injection.load_state_dict(ckpt["injection"])
+    built["policy_enc"].trunk.load_state_dict(ckpt["trunk"])
+    built["actor"].load_state_dict(ckpt["actor"])
+    built["critics"].load_state_dict(ckpt["critics"])
+    return built["policy_enc"], built["actor"], built["critics"], built
+
+
 def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
             episode_offset: int = 0, encoder=None, models=None,
-            round_index: int = 0) -> Path:
+            round_index: int = 0, watch: bool = False,
+            follow: Path | None = None, capacity: int | None = None,
+            success_only: bool = False, max_slot_retries: int = 0,
+            record_video: bool = False) -> Path:
     """Collect episodes with the run.py-style controller stack
     (TickChunkedController) via RolloutController mode='collect'. Per-tick
     encoder tokens + body features + h are written to the buffer; dtheta is
@@ -195,10 +231,26 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
 
     Episode structure: a fixed cyclic schedule over the shuffled
     (task, embodiment) product (exact balance); per episode, independent
-    draws for obstacle placement (80/20 on/off path) and behavior policy
+    draws for obstacle placement (off_path_frac) and behavior policy
     (filter_episode_frac with the HJ filter when models are given; round 0
     is always nominal-only). Episodes whose obstacle fails to spawn are
     re-drawn into the same schedule slot (h = +inf would NaN the target).
+
+    watch=True: keep collecting (cycling the schedule) until the buffer is
+    full — the async online mode; pair with a trainer that calls
+    buf.refresh(). follow=<checkpoint.pt>: reload the filter weights
+    whenever the trainer publishes a newer checkpoint.
+
+    success_only=True (warmup buffers): keep only episodes whose task
+    succeeded — failures are rolled back out of the buffer and the slot is
+    retried with a fresh scene (up to max_slot_retries). n_episodes then
+    counts KEPT episodes: for a warmup buffer use
+    n_episodes = 10 * len(tasks) * len(embodiments) and a saved --out dir
+    per LOO pool.
+
+    record_video=True: write a panel video per ATTEMPT to
+    out_root/videos/ (ep<slot>_a<attempt>_...mp4) — failed attempts are
+    kept on disk too, so warmup retries can be debugged visually.
     """
     from main.train.rollout import RolloutController  # lazy: rollout imports us
 
@@ -211,18 +263,59 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
     kins = {}  # per-embodiment kinematics, built on first use
 
     if buf is None:
-        capacity = cfg.n_episodes * (cfg.max_steps_per_episode + 2)
-        buf = StepBuffer(out_root / "buffer", capacity=capacity,
-                         header=cfg.to_dict())
+        buf_dir = out_root / "buffer"
+        if (buf_dir / "header.json").exists():
+            # async online: the warmup collector already created it — never
+            # rewrite the header (it would reset n for the reading trainer)
+            buf = StepBuffer(buf_dir)
+        else:
+            if capacity is None and watch:
+                raise ValueError("--watch needs --capacity (the buffer size)")
+            if capacity is None:
+                capacity = cfg.n_episodes * (cfg.max_steps_per_episode + 2)
+            buf = StepBuffer(buf_dir, capacity=capacity,
+                             header=cfg.to_dict())
 
     rng = np.random.RandomState(0)
     schedule = episode_schedule(cfg, cfg.n_episodes, seed=round_index)
     t_start = time.time()
     n_written = 0
-    n_skipped = 0
+    n_skipped = {"on_path": 0, "off_path": 0}
+    n_fallback = 0  # failed episodes kept for coverage (success-only cap)
+    follow_path = Path(follow) if follow else None
+    follow_mtime = None
+    built = None  # lazily-built model modules for --follow reloads
 
-    for ep in range(cfg.n_episodes):
-        task_ep, emb_ep = schedule[ep]
+    ep = 0          # schedule slot (advances per KEPT episode)
+    attempt = 0     # every rollout attempt (drives the scene seed)
+    slot_retries = 0
+    while True:
+        if not watch and ep >= cfg.n_episodes:
+            break
+        if watch and len(buf) >= buf.capacity:
+            print("[collect] buffer full; watch mode done")
+            break
+        if follow_path is not None:
+            if follow_path.exists():
+                mt = follow_path.stat().st_mtime
+                if mt != follow_mtime:
+                    try:
+                        policy_enc, actor, critics, built = (
+                            _load_follow_models(follow_path, built, cfg)
+                        )
+                        models = (policy_enc, actor, critics)
+                        follow_mtime = mt
+                        print(f"[collect] follow: reloaded {follow_path}")
+                    except Exception as exc:
+                        # a torn/unreadable checkpoint must not kill the
+                        # watcher — keep the current weights and retry next
+                        # episode (save is atomic via tmp+replace, so this
+                        # is only a belt-and-braces guard)
+                        print(f"[collect] follow: load failed ({exc}); "
+                              f"keeping previous weights")
+            elif models is None:
+                print("[collect] follow: no checkpoint yet; collecting nominal")
+        task_ep, emb_ep = schedule[ep % len(schedule)]
         # total spawn guarantee: with h = d_block only, an obstacle-free
         # episode would store h = +inf and NaN the Bellman target — re-draw
         # the slot (keeping the SAME task/embodiment) instead
@@ -239,13 +332,13 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
                 and rng.rand() < cfg.filter_episode_frac
             )
             candidate = RolloutController(
-                cfg_ep, seed=episode_offset + ep, mode="collect",
+                cfg_ep, seed=episode_offset + attempt, mode="collect",
                 encoder=encoder, kin=kins[cfg_ep.embodiment],
                 policy_enc=models[0] if models else None,
                 actor=models[1] if models else None,
                 critics=models[2] if models else None,
                 filter_active=use_filter,
-                buf=buf, episode_id=episode_offset + ep,
+                buf=buf, episode_id=episode_offset + attempt,
                 perturb_prob=cfg_ep.perturb_prob, rng=rng,
                 max_steps=int(cfg_ep.max_steps_per_episode * 250.0 / 25.0),
             )
@@ -256,28 +349,86 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
                   f"{cfg_ep.embodiment}; re-drawing")
             candidate.env.close()
         if ro is None:
-            n_skipped += 1
+            n_skipped[cfg_ep.obstacle_mode] = n_skipped.get(cfg_ep.obstacle_mode, 0) + 1
             print(f"[collect] ep {ep}: 5 spawn failures; skipping episode")
+            slot_retries = 0  # don't carry the failed slot's count forward
+            ep += 1
             continue
         print(f"ep {ep}: {cfg_ep.embodiment} / {cfg_ep.task} / "
               f"{cfg_ep.obstacle_model} / {cfg_ep.obstacle_mode} / "
               f"{'FILTER' if use_filter else 'nominal'}")
+        video = None
+        if record_video:
+            from main.train.eval_utils import PanelVideoWriter
+
+            vid_dir = out_root / "videos"
+            vid_dir.mkdir(parents=True, exist_ok=True)
+            video = PanelVideoWriter(
+                vid_dir / (f"ep{ep:04d}_a{attempt:03d}_"
+                           f"{cfg_ep.embodiment}_{cfg_ep.task}_"
+                           f"{cfg_ep.obstacle_mode}.mp4"),
+                fps=25.0, h_scale=float(getattr(cfg_ep, "h_scale", 1.0)),
+            )
+            ro.video = video
+        n_before = len(buf)
+        success = False
         try:
             trace = ro.run()
+            success = bool(trace["success"])
+        except AssertionError as exc:
+            if "buffer full" in str(exc):
+                # watch mode hit capacity mid-episode — normal termination
+                print("[collect] buffer full mid-episode; stopping")
+                if video is not None:
+                    video.close()
+                break
+            import traceback
+
+            traceback.print_exc()
         except Exception:
             import traceback
 
             traceback.print_exc()
-            buf.flush()  # persist n so far; continue with the next episode
+        finally:
+            if video is not None:
+                video.close()
+        attempt += 1
+        if success_only and not success:
+            slot_retries += 1
+            cap = (max_slot_retries if max_slot_retries > 0
+                   else (10 if cfg_ep.embodiment == "piper" else 50))
+            if slot_retries <= cap:
+                # success-only warmup: roll back the failed episode and
+                # retry the same slot with a fresh scene (new seed)
+                buf.discard_to(n_before)
+                buf.flush()
+                print(f"[collect] ep {ep} failed (attempt {slot_retries}/"
+                      f"{cap}); retrying with a new scene")
+                continue
+            # cap exhausted: keep this failed episode anyway — the HJ
+            # h-signal is intact, and the (task, embodiment) combo keeps
+            # its schedule coverage (some combos are unreachable, e.g.
+            # piper place_can_basket)
+            print(f"[collect] ep {ep}: {cap} failures — "
+                  f"keeping a failed episode for coverage "
+                  f"(task {cfg_ep.task} / {cfg_ep.embodiment})")
+            n_fallback += 1
+            slot_retries = 0
+            n_written = len(buf)
+            buf.flush()
+            ep += 1
             continue
+        slot_retries = 0
         n_written = len(buf)
         print(
-            f"ep {ep} done: success={trace['success']} "
+            f"ep {ep} done: success={success} "
             f"steps={n_written} ({n_written / (time.time() - t_start):.1f}/s)"
         )
         buf.flush()
+        ep += 1
 
     buf.flush()
+    print(f"spawn skips by mode: {n_skipped}; kept-failed episodes: {n_fallback}")
     print(f"\ncollection done: {n_written} steps in {time.time() - t_start:.0f}s")
     return out_root / "buffer"
 
@@ -298,14 +449,45 @@ def json_dumps(d) -> str:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--episodes", type=int, default=25)
+    p.add_argument("--episodes", type=int, default=25,
+                   help="episodes per collect call (warmup batch size; in "
+                        "--watch mode this only sizes the schedule cycle)")
     p.add_argument("--task", default="stack_blocks_two")
     p.add_argument("--embodiment", default="piper")
+    p.add_argument("--leave-out", default=None,
+                   help="leave-one-out: exclude this embodiment from the pool")
+    p.add_argument("--only-embodiment", default=None,
+                   help="finetune phase: collect ONLY this embodiment")
+    p.add_argument("--capacity", type=int, default=0,
+                   help="buffer capacity in steps; 0 = episodes x "
+                        "(max_steps+2). Size for the TOTAL run when using "
+                        "--watch (memmap allocation is fixed at creation)")
+    p.add_argument("--watch", action="store_true",
+                   help="async online mode: keep collecting until the buffer "
+                        "is full (pair with a trainer that refreshes)")
+    p.add_argument("--success-only", action="store_true",
+                   help="warmup buffers: keep only successful episodes "
+                        "(failures are rolled back and retried with a fresh "
+                        "scene, up to --max-slot-retries)")
+    p.add_argument("--record-video", action="store_true",
+                   help="write a panel video per attempt to <out>/videos/ "
+                        "(kept for failed attempts too, for debugging)")
+    p.add_argument("--max-slot-retries", type=int, default=0,
+                   help="success-only retry cap per slot; 0 = per-embodiment "
+                        "policy (piper 10, others 50)")
+    p.add_argument("--follow", type=Path, default=None,
+                   help="reload filter weights whenever this checkpoint "
+                        "changes (the trainer saves it every "
+                        "checkpoint_every steps)")
     p.add_argument("--out", type=Path, default=CEHJ_ROOT / "data" / "smoke")
     args = p.parse_args()
     cfg = FrozenConfig(task=args.task, embodiment=args.embodiment,
                        n_episodes=args.episodes)
-    collect(cfg, args.out)
+    apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
+    collect(cfg, args.out, watch=args.watch, follow=args.follow,
+            capacity=args.capacity or None, success_only=args.success_only,
+            max_slot_retries=args.max_slot_retries,
+            record_video=args.record_video)
 
 
 if __name__ == "__main__":

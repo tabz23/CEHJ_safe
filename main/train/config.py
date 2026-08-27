@@ -33,7 +33,8 @@ class FrozenConfig:
     obstacle_mode: str = "on_path"      # safety obstacle spawn mode for collection
     obstacle_t: float | None = None     # corridor t; None = sample per episode via
                                         # run.py's _corridor_t(seed) in U[0.22, 0.48]
-    off_path_frac: float = 0.2          # fraction of episodes with off_path obstacle
+    off_path_frac: float = 0.3          # fraction of episodes with off_path obstacle
+                                        # (collection AND eval); the rest are on_path
     filter_episode_frac: float = 0.8    # fraction of collection episodes with the filter
     h_include_payload: bool = True      # grasped object joins the body set after grasp
     encoder_variant: str = "HoloBrain_v0.0_GD"
@@ -45,8 +46,8 @@ class FrozenConfig:
     embodiment: str = "piper"
     obstacle_model: str = "068_boxdrink"
     task_choices: tuple = (
-        "stack_blocks_two", "stack_bowls_two", "place_burger_fries",
-        "place_bread_basket", "place_can_basket",
+        "place_container_plate", "place_burger_fries", "stack_blocks_two",
+        "stack_bowls_two", "place_bread_basket",
     )
     embodiment_choices: tuple = ("piper", "franka-panda", "ARX-X5", "ur5-wsg",
                              "aloha-agilex")
@@ -67,6 +68,11 @@ class FrozenConfig:
     alpha_anneal_steps: int = 20_000    # aggressive: unsafe-optimistic bonus
     grad_steps: int = 204800            # 200 epochs x 1024 (real training default)
     eval_every: int = 1024              # one epoch = 1024 grad steps (test runs: 50)
+    eval_sweep_every_epochs: int = 10   # rollout sweep cadence (sweep = 5 episodes);
+                                        # a sweep also fires at training start
+    eval_ema: float = 0.7               # EMA decay for per-(task,embodiment) metrics
+    checkpoint_every: int = 1024        # publish weights every N steps (async collector
+                                        # --follow reloads on checkpoint change)
     eval_seeds: tuple = (1000, 1001)
 
     # deployment filter: single margin, engage when Q(s, a_nom) < margin
@@ -100,3 +106,31 @@ class FrozenConfig:
         return hashlib.md5(
             json.dumps(self.to_dict(), sort_keys=True).encode()
         ).hexdigest()[:12]
+
+
+def apply_embodiment_selection(
+    cfg: "FrozenConfig", leave_out: str | None = None, only: str | None = None
+) -> "FrozenConfig":
+    """Leave-one-out cross-validation: restrict the embodiment pool.
+
+    --leave-out X  -> train/eval on all embodiments except X (phase 1)
+    --only X       -> train/eval on X alone (phase 2: finetune the phase-1
+                      checkpoint on the left-out embodiment)
+
+    EMBODIMENT_IDS are name-keyed so leaving one out does not shift ids.
+    The count-invariant architecture (no per-joint parameters) makes a
+    checkpoint from the 4-embodiment run shape-compatible with the 5th.
+    """
+    if only:
+        if only not in cfg.embodiment_choices:
+            raise ValueError(f"--only-embodiment {only!r} not a known embodiment")
+        cfg.embodiment_choices = (only,)
+    elif leave_out:
+        if leave_out not in cfg.embodiment_choices:
+            # idempotent: the saved config may already be filtered (the
+            # two-phase LOO flow passes the flag twice — collect and train)
+            return cfg
+        cfg.embodiment_choices = tuple(
+            e for e in cfg.embodiment_choices if e != leave_out
+        )
+    return cfg

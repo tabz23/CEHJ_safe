@@ -443,6 +443,26 @@ def geometric_pose(
             if best is not None:
                 xy = best
                 print(f"[obstacle] on_path fallback {best_ld:.2f} m off the line")
+        if xy is None:
+            # tier 2: anywhere feasible on the table, max keepaway clearance
+            # (turns most spawn failures into slightly-off-corridor episodes
+            # instead of re-drawn slots)
+            best = None
+            best_score = -1e9
+            for cand in _table_grid(block_r):
+                if not ok(cand):
+                    continue
+                clearance = min(
+                    float(np.linalg.norm(cand - np.asarray(pt[:2]))) - float(actor_r) - block_r
+                    for pt, actor_r in keepaways
+                )
+                if clearance > best_score:
+                    best = cand
+                    best_score = clearance
+            if best is not None:
+                xy = best
+                print("[obstacle] on_path tier-2 max-clearance spawn "
+                      f"(clearance {best_score:.3f} m)")
     if xy is None:
         print("[obstacle] no spawn pose clears pick/target keepaway; skipping block")
         return None, None

@@ -1077,6 +1077,7 @@ class TickChunkedController(ResidualController):
         spt = self.steps_per_tick
         i = 0    # physics-step cursor into the arm plans
         g_i = 0  # gripper row cursor (frozen during interventions)
+        needs_replan = False  # set by interventions; paid only on release
         while task.plan_success:
             n_l = _n_wp(left_arm) if left_arm is not None else 0
             n_r = _n_wp(right_arm) if right_arm is not None else 0
@@ -1091,8 +1092,15 @@ class TickChunkedController(ResidualController):
                     "left_g": left_g, "right_g": right_g, "g_i": g_i,
                 }
                 if self.tick_hook(ctx):
-                    # intervention: discard stale plans, replan from live qpos
+                    # intervention: the actor drove this block. Do NOT replan
+                    # yet — the release test next tick scores a_nom from the
+                    # (stale) existing plan, and a cuRobo plan is ~100 ms of
+                    # wall time; pay it only when control actually hands back.
                     self.n_interventions += 1
+                    needs_replan = True
+                    continue
+                if needs_replan:
+                    # release: discard the stale plans, replan from live qpos
                     if left_arm is not None:
                         left_arm = self._replan_arm("left", left_arm)
                     if right_arm is not None:
@@ -1103,6 +1111,7 @@ class TickChunkedController(ResidualController):
                         task.plan_success = False
                         return False
                     i = 0  # the new plan starts at its own row 0
+                    needs_replan = False
                     continue
 
             pos_l = vel_l = pos_r = vel_r = None

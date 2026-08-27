@@ -71,7 +71,8 @@ class RolloutController:
         self.perturb_prob = float(perturb_prob)
         self.rng = rng if rng is not None else np.random.RandomState(0)
         self.video = video
-        self.video_fps = 10.0           # frames per SIM second (time-based)
+        self.video_fps = 25.0           # every control tick, 1:1 sim time —
+        # a 3-tick block always gets 3 frames (never aliased)
         self._next_frame_t = 0.0
         self._last_diag = None
         self.max_steps = int(max_steps)
@@ -100,6 +101,8 @@ class RolloutController:
         self._tick_acc = 0.0
         self._orig_step = None
         self._last_ratio = 0.0
+        self._block_info = None      # (tick-in-block, hold_ticks, engaged_s)
+        self._engaged_ticks = 0
 
     # ---------------- a_nom assembly ----------------
     def _anom(self, ctx) -> torch.Tensor:
@@ -131,6 +134,13 @@ class RolloutController:
         an intervention just drove the arm (controller then replans)."""
         self._tick_source = SRC_PLANNER
         self._tick_action = self._anom(ctx).cpu().numpy()[0].astype(np.float64)
+        # panel ratio on EVERY tick: the nominal's demanded step as a
+        # fraction of the actor's bound (interventions overwrite it with
+        # the actor's own action ratio)
+        dmax = np.asarray(self.extractor.delta_theta_max, dtype=np.float64)
+        self._last_ratio = float(
+            np.abs(self._tick_action).max() / max(dmax.max(), 1e-9)
+        )
         if self.mode == "collect" and (self.flt is None or not self.filter_active):
             # nominal-only collection episode: no filter, perturbation only
             self._perturb_maybe()
@@ -151,10 +161,12 @@ class RolloutController:
         self.trace["intervened"].append(engaged)
         self.flt.track(engaged)
         if not engaged:
+            self._block_info = None
             return False
 
         # intervention: actor drives hj_hold_ticks, re-queried every tick
-        for _ in range(self.flt.hold_ticks):
+        self._engaged_ticks = getattr(self, "_engaged_ticks", 0)
+        for k in range(self.flt.hold_ticks):
             body, enc = self._model_inputs(self.env.get_encoder_obs(self.kin))
             with torch.no_grad():
                 a = self.flt.actor_action(enc)
@@ -163,6 +175,12 @@ class RolloutController:
             self._tick_action = a_np.astype(np.float64)
             self._last_ratio = float(
                 np.abs(a_np).max() / max(self.extractor.delta_theta_max.max(), 1e-9)
+            )
+            # panel block counter: tick-in-block + cumulative engaged time
+            self._engaged_ticks += 1
+            self._block_info = (
+                k + 1, self.flt.hold_ticks,
+                self._engaged_ticks * self.env.control_dt,
             )
             self.env.step_dtheta(a_np)
         return True
@@ -213,6 +231,11 @@ class RolloutController:
                 "d_right_held": diag.get("d_right_held"),
                 "true_argmin": diag.get("true_argmin", ""),
                 "holding": diag.get("holding", ""),
+                "holding_left": diag.get("holding_left", ""),
+                "holding_right": diag.get("holding_right", ""),
+                "hold_debug": diag.get("hold_debug", {}),
+                "contact": diag.get("contact", False),
+                "block": self._block_info,
                 "skill": current_skill(self.env.task),
             }
             self.video.add(
@@ -365,6 +388,16 @@ class RolloutController:
             success = bool(env.task.check_success())
         except RolloutTimeout as exc:
             print(f"[rollout] {exc}")
+        except AssertionError as exc:
+            if "buffer full" in str(exc):
+                # buffer-full is a normal termination signal in watch mode —
+                # but restore the step hook and release the env first
+                env.task.scene.step = self._orig_step
+                env.close()
+                raise
+            import traceback
+
+            traceback.print_exc()
         except Exception:
             import traceback
 

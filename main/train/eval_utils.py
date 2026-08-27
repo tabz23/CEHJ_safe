@@ -37,9 +37,14 @@ def run_eval_episode(cfg, seed, task, embodiment, encoder, policy_enc, actor,
     from main.train.rollout import RolloutController
 
     cfg_ep = dataclasses.replace(cfg, task=task, embodiment=embodiment)
+    # same on/off-path draw as collection (deterministic per eval seed)
+    if cfg_ep.randomize_scenes:
+        rng = np.random.RandomState(seed)
+        mode = "off_path" if rng.rand() < cfg_ep.off_path_frac else "on_path"
+        cfg_ep = dataclasses.replace(cfg_ep, obstacle_mode=mode)
     kin = make_kinematics(CKPT_DIR, cfg_ep.embodiment)
     print(f"[eval] {cfg_ep.embodiment} / {cfg_ep.task} / "
-          f"{cfg_ep.obstacle_model} seed={seed}")
+          f"{cfg_ep.obstacle_model} / {cfg_ep.obstacle_mode} seed={seed}")
 
     video = None
     vid_dir = CEHJ_ROOT / "runs" / "videos"
@@ -48,20 +53,35 @@ def run_eval_episode(cfg, seed, task, embodiment, encoder, policy_enc, actor,
     if record_video:
         vid_dir.mkdir(parents=True, exist_ok=True)
         video = PanelVideoWriter(
-            vid_dir / vid_name, fps=10.0,
+            vid_dir / vid_name, fps=25.0,
             h_scale=float(getattr(cfg_ep, "h_scale", 1.0)),
         )  # 10 fps sim-time
-    ro = RolloutController(
-        cfg_ep, seed, mode="filtered", encoder=encoder, kin=kin,
-        policy_enc=policy_enc, actor=actor, critics=critics,
-        video=video,
-        max_steps=int(cfg_ep.max_steps_per_episode * 250.0 / 25.0),
-    )
+    # total spawn guarantee (same as collect): with h = d_block only, an
+    # obstacle-free episode yields h = +inf — corrupting the eval figure and
+    # violation_rate — so re-draw the scene seed rather than run it
+    ro = None
+    used_seed = seed
+    for retry in range(5):
+        candidate = RolloutController(
+            cfg_ep, seed + retry * 1000, mode="filtered", encoder=encoder,
+            kin=kin, policy_enc=policy_enc, actor=actor, critics=critics,
+            video=video if retry == 0 else video,
+            max_steps=int(cfg_ep.max_steps_per_episode * 250.0 / 25.0),
+        )
+        if candidate.env.obstacle is not None:
+            ro = candidate
+            used_seed = seed + retry * 1000
+            break
+        print(f"[eval] spawn failed (seed {seed + retry * 1000}); re-drawing")
+        candidate.env.close()
+    if ro is None:
+        video.close() if video is not None else None
+        raise RuntimeError(f"eval spawn failed 5x for {task}/{embodiment}")
     trace = ro.run()
     trace["h_scale"] = float(getattr(cfg_ep, "h_scale", 1.0))
     trace["scene"] = {
         "task": cfg_ep.task, "embodiment": cfg_ep.embodiment,
-        "obstacle": cfg_ep.obstacle_model, "seed": int(seed),
+        "obstacle": cfg_ep.obstacle_model, "seed": int(used_seed),
     }
     if video is not None:
         video.close()
@@ -164,17 +184,33 @@ class PanelVideoWriter:
         lines = [
             f"t = {t:5.2f} s      step {step}/{n_steps}",
             f"h        = {h:+.3f} {unit}",
-            f"Q(s,a_nom)= {V:+.3f} {unit}",
-            f"h - Q    = {h - V:+.3f}",
         ]
+        if V is not None and np.isfinite(V):
+            lines += [
+                f"Q(s,a_nom)= {V:+.3f} {unit}",
+                f"h - Q    = {h - V:+.3f}",
+            ]
+        else:
+            # warmup / nominal-only: no critic, nothing scored
+            lines += ["Q(s,a_nom)=   -", "h - Q    =   -"]
         y = 16
         for line in lines:
             d.text((12, y), line, fill=(0, 0, 0))
             y += 22
         d.text((12, y), f"control  =  {control}", fill=color)
         y += 22
-        d.text((12, y), f"|dtheta| =  {ratio:.2f} x max", fill=(0, 0, 0))
+        # ratio: nominal's demanded step vs the actor bound on NOMINAL
+        # ticks, the actor's own action on FILTER ticks
+        d.text((12, y), f"|a| =  {ratio:.2f} x max", fill=(0, 0, 0))
         y += 22
+        block = extras.get("block") if extras else None
+        if block is not None:
+            d.text(
+                (12, y),
+                f"block {block[0]}/{block[1]}   engaged {block[2]:.2f} s",
+                fill=(200, 60, 40),
+            )
+            y += 22
         if extras:
             d.text(
                 (12, y),
@@ -191,6 +227,15 @@ class PanelVideoWriter:
             argmin = extras.get("true_argmin") or "-"
             d.text((12, y), f"argmin: {argmin}", fill=(0, 0, 0))
             y += 18
+            # HOLD line with provenance, same format as record.py's recorder
+            dbg = extras.get("hold_debug") or {}
+            hl = extras.get("holding_left") or "none"
+            hr = extras.get("holding_right") or "none"
+            sl = dbg.get("L_source") or "none"
+            sr = dbg.get("R_source") or "none"
+            hold_line = f"HOLD L={hl}({sl})  R={hr}({sr})"
+            d.text((12, y), hold_line[:40], fill=(0, 0, 0))
+            y += 18
             skill = extras.get("skill") or "-"
             d.text((12, y), skill[:38], fill=(80, 80, 80))
             y += 18
@@ -203,8 +248,9 @@ class PanelVideoWriter:
         if len(hist) > 1:
             x0, y0, pw, ph = 12, y + 20, W - 24, 160
             d.rectangle([x0, y0, x0 + pw, y0 + ph], outline=(200, 200, 200))
-            lo = min(min(hist), min(histV), -0.05)
-            hi = max(max(hist), max(histV), 0.05)
+            finV = [v for v in histV if np.isfinite(v)]
+            lo = min([min(hist), -0.05] + ([min(finV)] if finV else []))
+            hi = max([max(hist), 0.05] + ([max(finV)] if finV else []))
 
             def sy(val):
                 return y0 + ph - (val - lo) / (hi - lo) * ph
@@ -213,9 +259,18 @@ class PanelVideoWriter:
             d.line([x0, zero_y, x0 + pw, zero_y], fill=(0, 0, 0), width=1)
             n = len(hist)
             pts_h = [(x0 + i / (n - 1) * pw, sy(v)) for i, v in enumerate(hist)]
-            pts_V = [(x0 + i / (n - 1) * pw, sy(v)) for i, v in enumerate(histV)]
             d.line(pts_h, fill=(30, 100, 200), width=2)
-            d.line(pts_V, fill=(220, 60, 50), width=2)
+            # V may contain NaN (warmup: no critic) — draw finite segments
+            seg = []
+            for i, v in enumerate(histV):
+                if np.isfinite(v):
+                    seg.append((x0 + i / (n - 1) * pw, sy(v)))
+                else:
+                    if len(seg) > 1:
+                        d.line(seg, fill=(220, 60, 50), width=2)
+                    seg = []
+            if len(seg) > 1:
+                d.line(seg, fill=(220, 60, 50), width=2)
             d.text((x0 + 4, y0 + 4), "h", fill=(30, 100, 200))
             d.text((x0 + 20, y0 + 4), "V", fill=(220, 60, 50))
         return img

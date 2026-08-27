@@ -142,7 +142,40 @@ class StepBuffer:
     def flush(self) -> None:
         for arr in self.arrays.values():
             arr.flush()
-        (self.root / "header.json").write_text(json.dumps(self.header, indent=2))
+        # atomic header write: a concurrent reader (async trainer) must
+        # never see a partially-written n
+        tmp = self.root / "header.json.tmp"
+        tmp.write_text(json.dumps(self.header, indent=2))
+        tmp.replace(self.root / "header.json")
+
+    def refresh(self) -> int:
+        """Re-read n from the header and invalidate the sample cache.
+
+        For async collection: the collector process appends to the same
+        memmaps and flushes per episode; the trainer calls refresh() every
+        N grad steps to see the new rows. Rows below the flushed n are
+        complete (append bumps n only after all fields of a row are
+        written, and flush publishes n after the arrays are flushed).
+        """
+        header_path = self.root / "header.json"
+        try:
+            header = json.loads(header_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return self.n  # mid-rename or partially written; keep last n
+        n = int(header.get("n", self.n))
+        if n != self.n:
+            self.n = n
+            self._valid_t = None
+        return self.n
+
+    def discard_to(self, n: int) -> None:
+        """Roll back to n rows (drop the tail in place). Success-only
+        collection uses this to drop a failed episode after the fact."""
+        n = int(n)
+        assert 0 <= n <= self.n, f"discard_to({n}) with only {self.n} rows"
+        self.n = n
+        self.header["n"] = n
+        self._valid_t = None
 
     def __len__(self) -> int:
         return self.n

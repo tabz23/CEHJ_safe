@@ -487,7 +487,8 @@ class Env:
         Keys:
             imgs:         [1, 3, 3, 256, 320] float32 RGB, HoloBrain-normalized.
             depths:       [1, 3, 1, 256, 320] float32 metric depth (meters),
-                          alpha-masked (background = 0, RoboTwin convention).
+                          geometry-masked (void pixels = 0; RoboTwin's uint8
+                          alpha mask emulated for HDR/RT pictures).
             image_wh:     [3, 2] int (width, height) = (320, 256).
             projection_mat: [1, 3, 4, 4] float64, ego frame (see above).
             T_ego2world:  [4, 4] ego(head-cam)->world; pass as out_extrinsic.
@@ -519,10 +520,15 @@ class Env:
             rgba = cam.get_picture("Color")
             rgb = (rgba * 255).clip(0, 255).astype(np.uint8)[:, :, :3]
             pos = cam.get_picture("Position")
-            # alpha mask: background/transparent pixels carry zero depth,
-            # matching the depth HoloBrain was trained on (camera.py:431-445)
+            # depth mask: with RT the Color picture is HDR float and alpha is
+            # NOT 0/1 opacity (measured 1.2-5.0), so emulate RoboTwin's
+            # uint8-alpha mask (camera.py:431-445): real geometry keeps its
+            # depth, void = 0. Position.w < 1 marks valid geometry
+            # (RoboTwin's own pcd convention).
+            alpha = np.clip(rgba[:, :, 3], 0, 1).astype(np.float32)
+            valid = (pos[:, :, 3] < 1).astype(np.float32)
             depth = np.asarray(-pos[:, :, 2], dtype=np.float32)
-            depth = depth * (rgba[:, :, 3].astype(np.float32) / 255.0)
+            depth = depth * alpha * valid
             K = np.asarray(cam.get_intrinsic_matrix(), dtype=np.float64)
             h0, w0 = rgb.shape[:2]
             if (w0, h0) != (W, H):

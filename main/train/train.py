@@ -52,7 +52,7 @@ CEHJ_ROOT = Path(__file__).resolve().parents[2]
 
 from main.train.buffer import StepBuffer  # noqa: E402
 from main.train.collect import CKPT_DIR  # noqa: E402
-from main.train.config import FrozenConfig  # noqa: E402
+from main.train.config import FrozenConfig, apply_embodiment_selection  # noqa: E402
 from main.network.encoder import HoloBrainEncoder, RobotInjection  # noqa: E402
 from main.network.heads import PolicyEncoder, TokenActor, TwinCritic  # noqa: E402
 from main.network.trunk import GeometricTrunk  # noqa: E402
@@ -226,13 +226,18 @@ class Trainer:
         emb_ids = np.asarray(b["embodiment_id"])
         task_ids = np.asarray(b["task_id"])
         gap = (h - qmin).detach().cpu().numpy()
+        q_np = qmin.detach().cpu().numpy()
+        h_np = h.detach().cpu().numpy()
         for eid in np.unique(emb_ids):
             m = emb_ids == eid
-            out[f"emb{eid}/mean_q"] = float(qmin.detach().cpu().numpy()[m].mean())
+            out[f"emb{eid}/mean_q"] = float(q_np[m].mean())
             out[f"emb{eid}/mean_gap"] = float(gap[m].mean())
+            out[f"emb{eid}/mean_h"] = float(h_np[m].mean())
         for tid in np.unique(task_ids):
             m = task_ids == tid
+            out[f"task{tid}/mean_q"] = float(q_np[m].mean())
             out[f"task{tid}/mean_gap"] = float(gap[m].mean())
+            out[f"task{tid}/mean_h"] = float(h_np[m].mean())
         return out
 
     # ---------- eval ----------
@@ -291,15 +296,49 @@ class Trainer:
             flat["eval/intervention_rate"] = float(
                 _np.mean([m["intervention_rate"] for m in metrics.values()])
             )
+            # EMA per (task, embodiment): sweeps cover each combo only every
+            # len(embodiments) sweeps — the EMA keeps the wandb panels
+            # populated instead of one-episode samples reading as noise
+            ema = getattr(self, "_eval_ema", None) or {}
+            beta = float(getattr(self.cfg, "eval_ema", 0.7))
+            for key, m in metrics.items():
+                slot = ema.setdefault(key, {})
+                for k, v in m.items():
+                    if isinstance(v, bool):
+                        v = float(v)
+                    if not isinstance(v, (int, float)) or not np.isfinite(v):
+                        continue
+                    slot[k] = beta * slot.get(k, v) + (1 - beta) * v
+                    flat[f"eval_ema/{key}/{k}"] = slot[k]
+            self._eval_ema = ema
             wandb_run.log(flat, step=self.step)
         return metrics
 
     # ---------- training loop ----------
     def train_steps(self, n: int, wandb_run=None) -> None:
-        """n gradient steps with the eval cadence from cfg.eval_every."""
+        """n gradient steps; a rollout sweep fires at training start and
+        every eval_every * eval_sweep_every_epochs steps (a sweep is 5 full
+        episodes — running it per epoch would dominate wall time)."""
+        if not getattr(self, "_swept_at_start", False):
+            self._swept_at_start = True
+            self.evaluate(wandb_run)
+        # async online: if the warmup collector hasn't written enough for a
+        # batch yet, wait for it rather than crashing on an empty buffer
+        import time as _time
+
+        while len(self.buf) < self.cfg.batch_size:
+            print(f"[train] waiting for data ({len(self.buf)} steps)...")
+            _time.sleep(5)
+            self.buf.refresh()
+        sweep_every = self.cfg.eval_every * self.cfg.eval_sweep_every_epochs
         t0 = time.time()
         for _ in range(n):
             m = self.grad_step()
+            if self.step % 100 == 0:
+                self.buf.refresh()  # async collector appends between sweeps
+            if self.step % self.cfg.checkpoint_every == 0:
+                # publish weights so a --follow collector picks them up
+                self.save_checkpoint(self.run_dir / "checkpoint.pt")
             if self.step % 20 == 0:
                 sps = (self.step + 1) / (time.time() - t0 + 1e-9)
                 print(
@@ -310,11 +349,14 @@ class Trainer:
                 )
                 if wandb_run is not None:
                     wandb_run.log({**m, "steps_per_sec": sps}, step=self.step)
-            if self.step % self.cfg.eval_every == 0 and self.step > 0:
+            if self.step % sweep_every == 0 and self.step > 0:
                 self.evaluate(wandb_run)
 
     def save_checkpoint(self, path: Path) -> Path:
         path = Path(path)
+        # atomic publish: the --follow collector stats mtime per episode and
+        # would read a half-written file if we saved in place
+        tmp = path.parent / (path.name + ".tmp")
         torch.save(
             {
                 "injection": self.injection.state_dict(),
@@ -322,9 +364,24 @@ class Trainer:
                 "actor": self.actor.state_dict(),
                 "critics": self.critics.state_dict(),
             },
-            path,
+            tmp,
         )
+        os.replace(tmp, path)
         return path
+
+    def load_checkpoint(self, path: Path) -> None:
+        """Load weights from a previous run (e.g. LOO phase 1 -> finetune).
+        Shape-compatible across embodiments by design (no per-joint
+        parameters). Polyak targets are re-synced to the loaded weights."""
+        ckpt = torch.load(Path(path), map_location="cuda", weights_only=True)
+        self.injection.load_state_dict(ckpt["injection"])
+        self.trunk.load_state_dict(ckpt["trunk"])
+        self.actor.load_state_dict(ckpt["actor"])
+        self.critics.load_state_dict(ckpt["critics"])
+        self.critics_targ.load_state_dict(self.critics.state_dict())
+        self.injection_targ.load_state_dict(self.injection.state_dict())
+        self.trunk_targ.load_state_dict(self.trunk.state_dict())
+        print(f"loaded checkpoint {path}")
 
 
 def main() -> None:
@@ -339,9 +396,18 @@ def main() -> None:
                    help=">0: DAgger loop — collect N rounds (round 0 "
                         "nominal-only, later rounds cfg.filter_episode_frac "
                         "with current weights), training between rounds")
-    p.add_argument("--episodes-per-round", type=int, default=20)
+    p.add_argument("--episodes-per-round", type=int, default=0,
+                   help="per DAgger round; 0 = len(tasks) x len(embodiments) "
+                        "so every round covers the full product")
     p.add_argument("--grad-steps-per-round", type=int, default=1024)
     p.add_argument("--no-wandb", action="store_true")
+    p.add_argument("--leave-out", default=None,
+                   help="leave-one-out phase 1: exclude this embodiment")
+    p.add_argument("--only-embodiment", default=None,
+                   help="leave-one-out phase 2: train ONLY this embodiment")
+    p.add_argument("--init-from", type=Path, default=None,
+                   help="load weights from a previous checkpoint "
+                        "(e.g. the 4-embodiment phase-1 run) before training")
     args = p.parse_args()
     args.data = args.data.resolve()
     args.run = args.run.resolve()  # RoboTwin chdirs during env creation
@@ -361,18 +427,24 @@ def main() -> None:
 
         cfg = FrozenConfig()
         cfg.eval_every = args.eval_every
-        capacity = (args.collect_rounds * args.episodes_per_round
+        apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
+        n_ep = args.episodes_per_round or (
+            len(cfg.task_choices) * len(cfg.embodiment_choices)
+        )
+        capacity = (args.collect_rounds * n_ep
                     * (cfg.max_steps_per_episode + 2))
         trainer = Trainer(cfg, args.data, args.run, create_capacity=capacity)
+        if args.init_from is not None:
+            trainer.load_checkpoint(args.init_from)
         if run is not None:
             run.config.update(cfg.to_dict())
         for r in range(args.collect_rounds):
             models = None if r == 0 else (
                 trainer.policy_enc, trainer.actor, trainer.critics
             )
-            cfg_r = dataclasses.replace(cfg, n_episodes=args.episodes_per_round)
+            cfg_r = dataclasses.replace(cfg, n_episodes=n_ep)
             collect(cfg_r, args.data, buf=trainer.buf,
-                    episode_offset=r * args.episodes_per_round,
+                    episode_offset=r * n_ep,
                     encoder=trainer._eval_encoder, models=models,
                     round_index=r)
             trainer.train_steps(args.grad_steps_per_round, run)
@@ -382,9 +454,12 @@ def main() -> None:
         cfg = FrozenConfig.load(args.data / "config.json")
         cfg.grad_steps = args.grad_steps
         cfg.eval_every = args.eval_every
+        apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
         if run is not None:
             run.config.update(cfg.to_dict())
         trainer = Trainer(cfg, args.data, args.run)
+        if args.init_from is not None:
+            trainer.load_checkpoint(args.init_from)
         trainer.train_steps(cfg.grad_steps, run)
         trainer.save_checkpoint(args.run / "checkpoint.pt")
         trainer.evaluate(run)

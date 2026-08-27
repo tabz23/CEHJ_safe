@@ -130,6 +130,9 @@ def compute_h(env, table_margin: float = 0.01, table_height: float = TABLE_HEIGH
         "per_link": per_link,
         "true_argmin": true_argmin,
         "holding": info.get("holding", ""),
+        "holding_left": info.get("holding_left", ""),
+        "holding_right": info.get("holding_right", ""),
+        "hold_debug": info.get("hold_debug", {}),
         "contact": info.get("contact", False),
         "n_below_table": n_below,
     }
