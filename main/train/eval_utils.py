@@ -211,6 +211,16 @@ class PanelVideoWriter:
         # ticks, the actor's own action on FILTER ticks
         d.text((12, y), f"|a| =  {ratio:.2f} x max", fill=(0, 0, 0))
         y += 22
+        # cumulative intervention count (0 ticks on pure-nominal episodes)
+        if extras:
+            iv = extras.get("intervened")
+            if iv is not None:
+                d.text(
+                    (12, y),
+                    f"intervened: {iv[0]} ticks ({iv[1]:.2f} s)",
+                    fill=(200, 60, 40) if iv[0] else (60, 60, 60),
+                )
+                y += 22
         block = extras.get("block") if extras else None
         if block is not None:
             d.text(

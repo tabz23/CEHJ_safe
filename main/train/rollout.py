@@ -236,6 +236,9 @@ class RolloutController:
                 "hold_debug": diag.get("hold_debug", {}),
                 "contact": diag.get("contact", False),
                 "block": self._block_info,
+                # cumulative actor intervention so far: (ticks, seconds)
+                "intervened": (self._engaged_ticks,
+                               self._engaged_ticks * self.env.control_dt),
                 "skill": current_skill(self.env.task),
             }
             self.video.add(
