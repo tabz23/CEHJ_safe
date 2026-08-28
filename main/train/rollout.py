@@ -337,7 +337,7 @@ class RolloutController:
             mask = (np.abs(cmd) > 0) & (self._pending["dtheta_max"] > 0)
             denom = float(np.linalg.norm(cmd[mask]))
             if denom > 1e-6:
-                achieved = qraw - self._pending["qpos_raw"]
+                achieved = qraw_pad - self._pending["qpos_raw"]
                 self.trace["real_ratio"].append(
                     float(np.linalg.norm(achieved[mask])) / denom
                 )
