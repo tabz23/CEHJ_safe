@@ -19,7 +19,8 @@ from pathlib import Path
 class FrozenConfig:
     # problem definition (change what V means)
     control_dt: float = 0.04            # 25 Hz control: 250/25 = exactly 10 physics steps/tick
-    kappa: float = 0.25                 # fraction of URDF vel limit per step
+    kappa: float = 1.0                  # fraction of URDF vel limit per step; 1.0 = actor
+                                        # and a full-speed cuRobo tick share the same dtheta box
     softmin_T: float = 0.02             # metres; softmin temperature
     gamma: float = 0.9                  # HJ discount (annealed -> gamma_final)
     gamma_final: float = 0.999

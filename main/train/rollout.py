@@ -58,7 +58,7 @@ class RolloutController:
 
         self.cfg = cfg
         self.env = make_training_env(cfg, seed)
-        self.extractor = BodyTokenExtractor(self.env)
+        self.extractor = BodyTokenExtractor(self.env, kappa=cfg.kappa)
         self.encoder = encoder
         self.kin = kin
         self.policy_enc = policy_enc
