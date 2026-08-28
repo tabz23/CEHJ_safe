@@ -223,8 +223,7 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
             round_index: int = 0, watch: bool = False,
             follow: Path | None = None, capacity: int | None = None,
             success_only: bool = False, max_slot_retries: int = 0,
-            record_video: bool = False, metrics=None,
-            pin_mode: bool = True) -> Path:
+            record_video: bool = False, metrics=None) -> Path:
     """Collect episodes with the run.py-style controller stack
     (TickChunkedController) via RolloutController mode='collect'. Per-tick
     encoder tokens + body features + h are written to the buffer; dtheta is
@@ -330,7 +329,7 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
         if ep != slot_key:
             slot_key = ep
             slot_mode = None
-            if success_only and pin_mode and emb_ep != "piper":
+            if success_only and emb_ep != "piper":
                 slot_mode = ("off_path" if rng.rand() < cfg.off_path_frac
                              else "on_path")
         # total spawn guarantee: with h = d_block only, an obstacle-free
@@ -505,9 +504,6 @@ def main() -> None:
     p.add_argument("--record-video", action="store_true",
                    help="write a panel video per attempt to <out>/videos/ "
                         "(kept for failed attempts too, for debugging)")
-    p.add_argument("--no-pin-mode", action="store_true",
-                   help="success-only retries re-draw on/off-path each "
-                        "attempt (fast tests; skews the accepted ratio)")
     p.add_argument("--max-slot-retries", type=int, default=0,
                    help="success-only retry cap per slot; 0 = per-embodiment "
                         "policy (piper 10, others 50)")
@@ -523,7 +519,7 @@ def main() -> None:
     collect(cfg, args.out, watch=args.watch, follow=args.follow,
             capacity=args.capacity or None, success_only=args.success_only,
             max_slot_retries=args.max_slot_retries,
-            record_video=args.record_video, pin_mode=not args.no_pin_mode)
+            record_video=args.record_video)
 
 
 if __name__ == "__main__":
