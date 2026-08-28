@@ -245,8 +245,10 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
     succeeded — failures are rolled back out of the buffer and the slot is
     retried with a fresh scene (up to max_slot_retries). n_episodes then
     counts KEPT episodes: for a warmup buffer use
-    n_episodes = 10 * len(tasks) * len(embodiments) and a saved --out dir
-    per LOO pool.
+    n_episodes = 10 * len(tasks) * len(embodiments). ONE shared warmup
+    buffer covers all embodiments — leave-one-out runs filter the held-out
+    embodiment at sample time (StepBuffer.set_embodiment_filter), so do
+    NOT pass --leave-out during warmup collection.
 
     record_video=True: write a panel video per ATTEMPT to
     out_root/videos/ (ep<slot>_a<attempt>_...mp4) — failed attempts are

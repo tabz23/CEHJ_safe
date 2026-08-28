@@ -92,6 +92,26 @@ class Trainer:
                 )
             StepBuffer(buf_dir, capacity=create_capacity, header=cfg.to_dict())
         self.buf = StepBuffer(buf_dir)  # capacity from header
+        # leave-one-out: the warmup buffer is SHARED across splits — restrict
+        # sampling to the selected embodiment pool instead of collecting a
+        # per-split buffer (phase 1 --leave-out X -> pool = all minus X;
+        # phase 2 --only-embodiment X -> pool = {X})
+        from main.train.rollout import EMBODIMENT_IDS
+
+        allowed = {EMBODIMENT_IDS[e] for e in cfg.embodiment_choices
+                   if e in EMBODIMENT_IDS}
+        if 0 < len(allowed) < len(EMBODIMENT_IDS):
+            self.buf.set_embodiment_filter(allowed)
+            n_valid = len(self.buf._valid_transitions())
+            if n_valid == 0:
+                raise RuntimeError(
+                    f"embodiment filter {sorted(allowed)} leaves no "
+                    f"transitions in {buf_dir}"
+                )
+            print(f"buffer: {len(self.buf)} steps, "
+                  f"{n_valid} valid transitions after embodiment filter")
+        else:
+            print(f"buffer: {len(self.buf)} steps")
         print(f"buffer: {len(self.buf)} steps")
 
         self.injection = RobotInjection().cuda()

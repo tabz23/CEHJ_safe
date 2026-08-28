@@ -182,12 +182,31 @@ class StepBuffer:
     def __len__(self) -> int:
         return self.n
 
+    def set_embodiment_filter(self, allowed_ids: set[int] | None) -> None:
+        """LOO support: restrict sampling to these embodiment_ids (None = all).
+
+        One shared warmup buffer holds all embodiments; each leave-one-out
+        run just filters the held-out embodiment out of the sampled batches.
+        """
+        self._emb_filter = None if allowed_ids is None else np.array(
+            sorted(allowed_ids), dtype=np.int8
+        )
+        self._valid_t = None  # invalidate the sample cache
+
     def _valid_transitions(self) -> np.ndarray:
-        """Cached list of t where (t, t+1) stays inside one episode."""
+        """Cached list of t where (t, t+1) stays inside one episode and,
+        if an embodiment filter is set, belongs to an allowed embodiment
+        (t and t+1 share an episode, hence an embodiment — masking t
+        suffices)."""
         if self._valid_t is None:
             ep = self.arrays["episode_id"][: self.n]
             done = self.arrays["done"][: self.n]
-            self._valid_t = np.nonzero((ep[:-1] == ep[1:]) & ~done[:-1])[0]
+            mask = (ep[:-1] == ep[1:]) & ~done[:-1]
+            emb_filter = getattr(self, "_emb_filter", None)
+            if emb_filter is not None:
+                emb = self.arrays["embodiment_id"][: self.n]
+                mask &= np.isin(emb[:-1], emb_filter)
+            self._valid_t = np.nonzero(mask)[0]
         return self._valid_t
 
     def sample(self, batch: int, rng: np.random.RandomState | None = None) -> dict:
