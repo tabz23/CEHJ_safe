@@ -22,6 +22,32 @@ import sys
 CEHJ_ROOT = Path(__file__).resolve().parents[2]
 
 
+def compute_trace_metrics(trace: dict, h_scale: float) -> dict:
+    """Per-episode metrics from a RolloutController trace (collection or
+    eval). h/V are stored in h_scale (training) units; distances are
+    reported in cm."""
+    h_arr = np.array(trace["h"])
+    V_arr = np.array(trace["V"])
+    Vt_arr = np.array(trace["V_t"])
+    cm = 100.0 / float(h_scale)
+    if len(V_arr) and len(h_arr):
+        h_at_v = np.interp(Vt_arr, np.array(trace["t"]), h_arr)
+        v_le_h = float((V_arr <= h_at_v + 1e-6).mean())
+        mean_gap = float((h_at_v - V_arr).mean()) * cm
+    else:
+        v_le_h, mean_gap = float("nan"), float("nan")
+    return {
+        "violation_rate": float((h_arr < 0).mean()) if len(h_arr) else float("nan"),
+        "intervention_rate": float(trace.get("intervention_rate", 0.0)),
+        "mode_switches": int(trace.get("mode_switches", 0)),
+        "task_success": bool(trace["success"]),
+        "realized_cmd_ratio": float(trace.get("mean_realized_ratio", float("nan"))),
+        "min_h": float(h_arr.min()) * cm if len(h_arr) else float("nan"),
+        "v_le_h_frac": v_le_h,
+        "mean_gap": mean_gap,
+    }
+
+
 def run_eval_episode(cfg, seed, task, embodiment, encoder, policy_enc, actor,
                      critics, record_video=True, tag=""):
     """Run one filtered eval episode (nominal + safety filter, the Q(s,
@@ -88,27 +114,7 @@ def run_eval_episode(cfg, seed, task, embodiment, encoder, policy_enc, actor,
         trace["video_path"] = str(vid_dir / vid_name)
 
     h_arr = np.array(trace["h"])
-    t_arr = np.array(trace["t"])
-    V_arr = np.array(trace["V"])
-    Vt_arr = np.array(trace["V_t"])
-    # h/V are stored in h_scale (training) units; report metrics in cm
-    cm = 100.0 / float(trace["h_scale"])
-    if len(V_arr) and len(h_arr):
-        h_at_v = np.interp(Vt_arr, t_arr, h_arr)  # h at the V eval times
-        v_le_h = float((V_arr <= h_at_v + 1e-6).mean())
-        mean_gap = float((h_at_v - V_arr).mean()) * cm
-    else:
-        v_le_h, mean_gap = float("nan"), float("nan")
-    trace["metrics"] = {
-        "violation_rate": float((h_arr < 0).mean()) if len(h_arr) else float("nan"),
-        "intervention_rate": float(trace.get("intervention_rate", 0.0)),
-        "mode_switches": int(trace.get("mode_switches", 0)),
-        "task_success": bool(trace["success"]),
-        "realized_cmd_ratio": float(trace.get("mean_realized_ratio", float("nan"))),
-        "min_h": float(h_arr.min()) * cm if len(h_arr) else float("nan"),
-        "v_le_h_frac": v_le_h,
-        "mean_gap": mean_gap,
-    }
+    trace["metrics"] = compute_trace_metrics(trace, trace["h_scale"])
     return trace
 
 

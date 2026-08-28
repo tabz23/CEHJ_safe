@@ -70,8 +70,9 @@ class FrozenConfig:
     alpha_anneal_steps: int = 20_000    # aggressive: unsafe-optimistic bonus
     grad_steps: int = 204800            # 200 epochs x 1024 (real training default)
     eval_every: int = 1024              # one epoch = 1024 grad steps (test runs: 50)
-    eval_sweep_every_epochs: int = 10   # rollout sweep cadence (sweep = 5 episodes);
-                                        # a sweep also fires at training start
+    eval_sweep_every_epochs: int = 0    # rollout sweeps disabled by default —
+                                        # round collection records filter metrics
+                                        # (RoundMetrics); >0 re-enables sweeps
     eval_ema: float = 0.7               # EMA decay for per-(task,embodiment) metrics
     checkpoint_every: int = 1024        # publish weights every N steps (async collector
                                         # --follow reloads on checkpoint change)

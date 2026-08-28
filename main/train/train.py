@@ -378,10 +378,12 @@ class Trainer:
 
     # ---------- training loop ----------
     def train_steps(self, n: int, wandb_run=None) -> None:
-        """n gradient steps; a rollout sweep fires at training start and
-        every eval_every * eval_sweep_every_epochs steps (a sweep is 5 full
-        episodes — running it per epoch would dominate wall time)."""
-        if not getattr(self, "_swept_at_start", False):
+        """n gradient steps. Rollout sweeps are DISABLED when
+        eval_sweep_every_epochs == 0 (the default for round-based training —
+        filter metrics come from the collection episodes themselves via
+        RoundMetrics, so no separate sim passes are spent on eval)."""
+        sweeps_on = self.cfg.eval_sweep_every_epochs > 0
+        if sweeps_on and not getattr(self, "_swept_at_start", False):
             self._swept_at_start = True
             self.evaluate(wandb_run)
         # async online: if the warmup collector hasn't written enough for a
@@ -392,7 +394,8 @@ class Trainer:
             print(f"[train] waiting for data ({len(self.buf)} steps)...")
             _time.sleep(5)
             self.buf.refresh()
-        sweep_every = self.cfg.eval_every * self.cfg.eval_sweep_every_epochs
+        sweep_every = (self.cfg.eval_every * self.cfg.eval_sweep_every_epochs
+                       if sweeps_on else None)
         t0 = time.time()
         for _ in range(n):
             m = self.grad_step()
@@ -413,7 +416,8 @@ class Trainer:
                     _safe_wandb_log(
                         wandb_run, {**m, "steps_per_sec": sps}, self.step
                     )
-            if self.step % sweep_every == 0 and self.step > 0:
+            if sweep_every is not None and self.step % sweep_every == 0 \
+                    and self.step > 0:
                 self.evaluate(wandb_run)
 
     def save_checkpoint(self, path: Path) -> Path:
@@ -456,9 +460,11 @@ def main() -> None:
                    help="200 epochs x 1024 by default")
     p.add_argument("--eval-every", type=int, default=1024,
                    help="grad steps per epoch (test runs: 50)")
-    p.add_argument("--eval-sweep-every-epochs", type=int, default=10,
+    p.add_argument("--eval-sweep-every-epochs", type=int, default=0,
                    help="rollout sweep every N epochs (a sweep is 5 full "
-                        "episodes); set 1 for short test runs")
+                        "episodes); 0 = disabled (default — round-based "
+                        "training gets filter metrics from the collection "
+                        "episodes via RoundMetrics)")
     p.add_argument("--collect-rounds", type=int, default=0,
                    help=">0: DAgger loop — collect N rounds (round 0 "
                         "nominal-only, later rounds cfg.filter_episode_frac "
@@ -518,6 +524,13 @@ def main() -> None:
             trainer.load_checkpoint(args.init_from)
         if run is not None:
             run.config.update(cfg.to_dict())
+        from main.train.round_metrics import RoundMetrics
+        from main.train.rollout import EMBODIMENT_IDS
+
+        # filter metrics come from the COLLECTION episodes (filter-active
+        # only) — no standalone eval sweep during training. Heatmaps land in
+        # <run>/eval/<metric>/roundXXX.png; overall means go to wandb.
+        rmet = RoundMetrics(args.run / "eval" / "round_metrics.jsonl")
         # warmup ids were assigned by the standalone collector; keep round
         # ids clear of them (ids are diagnostic only)
         id_base = 10_000 if warmup_exists else 0
@@ -534,8 +547,19 @@ def main() -> None:
             collect(cfg_r, args.data, buf=trainer.buf,
                     episode_offset=id_base + r * n_ep,
                     encoder=trainer._eval_encoder, models=models,
-                    round_index=r + 1)
-        trainer.evaluate(run)
+                    round_index=r + 1, metrics=rmet)
+            overall = rmet.render(
+                args.run / "eval", tag=f"round{r + 1:03d}",
+                tasks=list(cfg.task_choices),
+                embodiments=list(EMBODIMENT_IDS),
+                wandb_run=run, step=trainer.step,
+            )
+            print(f"[round {r + 1}] overall: "
+                  + " ".join(f"{k}={v:.3f}" for k, v in overall.items()))
+        # final render (all rounds accumulated) instead of the removed sweep
+        rmet.render(args.run / "eval", tag="final",
+                    tasks=list(cfg.task_choices),
+                    embodiments=list(EMBODIMENT_IDS))
     else:
         cfg = FrozenConfig.load(args.data / "config.json")
         cfg.grad_steps = args.grad_steps

@@ -223,7 +223,7 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
             round_index: int = 0, watch: bool = False,
             follow: Path | None = None, capacity: int | None = None,
             success_only: bool = False, max_slot_retries: int = 0,
-            record_video: bool = False) -> Path:
+            record_video: bool = False, metrics=None) -> Path:
     """Collect episodes with the run.py-style controller stack
     (TickChunkedController) via RolloutController mode='collect'. Per-tick
     encoder tokens + body features + h are written to the buffer; dtheta is
@@ -441,6 +441,16 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
             continue
         slot_retries = 0
         n_written = len(buf)
+        # filter-metric record: only kept, filter-active episodes — nominal-
+        # only episodes say nothing about the filter (round_metrics renders
+        # the per-combo heatmaps during training)
+        if metrics is not None and use_filter and trace:
+            from main.train.eval_utils import compute_trace_metrics
+
+            metrics.record(
+                round_index, cfg_ep.task, cfg_ep.embodiment,
+                compute_trace_metrics(trace, float(cfg_ep.h_scale)),
+            )
         print(
             f"ep {ep} done: success={success} "
             f"steps={n_written} ({n_written / (time.time() - t_start):.1f}/s) "
