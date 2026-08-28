@@ -61,8 +61,11 @@ class RoundMetrics:
         recs = self.load()
         # per-combo mean over every filter episode recorded so far
         combo: dict = {}
+        # per-round overall mean (trend over training, all combos pooled)
+        by_round: dict[int, list[dict]] = {}
         for r in recs:
             combo.setdefault((r["task"], r["embodiment"]), []).append(r)
+            by_round.setdefault(int(r["round"]), []).append(r)
 
         overall = {}
         for metric in METRICS:
@@ -103,6 +106,27 @@ class RoundMetrics:
             fig.colorbar(im, ax=ax, shrink=0.8)
             fig.tight_layout()
             fig.savefig(mdir / f"{tag}.png", dpi=110)
+            plt.close(fig)
+
+            # trend over training: per-round overall mean, all combos pooled
+            # (answers "is X getting better as rounds progress" at a glance)
+            rs, ys = [], []
+            for r_idx in sorted(by_round):
+                vals = [rec.get(metric) for rec in by_round[r_idx]]
+                vals = [float(v) for v in vals
+                        if v is not None and np.isfinite(float(v))]
+                if vals:
+                    rs.append(r_idx)
+                    ys.append(float(np.mean(vals)))
+            fig, ax = plt.subplots(figsize=(6, 3.5))
+            ax.plot(rs, ys, marker="o", ms=4)
+            ax.set_xlabel("collection round")
+            ax.set_ylabel(metric)
+            ax.set_title(f"{metric} over rounds (overall, all combos)",
+                         fontsize=10)
+            ax.grid(alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(mdir / "trend.png", dpi=110)
             plt.close(fig)
 
         if wandb_run is not None:
