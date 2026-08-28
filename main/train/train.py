@@ -231,6 +231,23 @@ class Trainer:
             "gn_encoder": float(gn_e),
             "buffer": len(self.buf),
         }
+        # mode-collapse diagnostics (does the actor output the same action
+        # everywhere?): diversity of the deterministic action across states,
+        # and how hard it leans on the tanh bound. Masked to real joints.
+        with torch.no_grad():
+            a_det, _, _ = self.actor(enc_det.body, ji, dtheta_max,
+                                     deterministic=True)
+            jmask = (dtheta_max > 0).float()
+            out["actor/action_std"] = float(
+                (a_det.std(dim=0) * jmask).sum() / jmask.sum().clamp_min(1)
+            )
+            out["actor/sat_frac"] = float(
+                ((a_det.abs() / dtheta_max.clamp_min(1e-9)) > 0.95
+                 ).float().mul(jmask).sum() / jmask.sum().clamp_min(1)
+            )
+            out["data/action_std"] = float(
+                (dtheta.std(dim=0) * jmask).sum() / jmask.sum().clamp_min(1)
+            )
         # per-embodiment / per-task splits: free — both ids ride in the batch
         emb_ids = np.asarray(b["embodiment_id"])
         task_ids = np.asarray(b["task_id"])
