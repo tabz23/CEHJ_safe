@@ -27,10 +27,11 @@ class FrozenConfig:
     gamma_anneal_steps: int = 50_000
     table_margin: float = 0.01          # table margin for cuRobo's world model (NOT in h)
     table_height: float = 0.74          # RoboTwin default table height (m)
-    h_scale: float = 100.0              # h/V are trained in h*h_scale units (= cm; h here
-                                        # is ~mm-cm). softmin_T and the filter margin below
-                                        # stay in PHYSICAL metres, scaled at use. Watch
-                                        # gn_critic: targets 5x larger vs h_scale=20.
+    h_scale: float = 20.0               # h/V are trained in h*20 units (~[-1, 1] for
+                                        # cm-scale hazards — better conditioned than cm).
+                                        # softmin_T and the filter margin stay in
+                                        # PHYSICAL metres, scaled at use. Visualization
+                                        # converts back to cm via x(100 / h_scale).
     obstacle_mode: str = "on_path"      # safety obstacle spawn mode for collection
     obstacle_t: float | None = None     # corridor t; None = sample per episode via
                                         # run.py's _corridor_t(seed) in U[0.22, 0.48]

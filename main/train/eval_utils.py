@@ -91,10 +91,12 @@ def run_eval_episode(cfg, seed, task, embodiment, encoder, policy_enc, actor,
     t_arr = np.array(trace["t"])
     V_arr = np.array(trace["V"])
     Vt_arr = np.array(trace["V_t"])
+    # h/V are stored in h_scale (training) units; report metrics in cm
+    cm = 100.0 / float(trace["h_scale"])
     if len(V_arr) and len(h_arr):
         h_at_v = np.interp(Vt_arr, t_arr, h_arr)  # h at the V eval times
         v_le_h = float((V_arr <= h_at_v + 1e-6).mean())
-        mean_gap = float((h_at_v - V_arr).mean())
+        mean_gap = float((h_at_v - V_arr).mean()) * cm
     else:
         v_le_h, mean_gap = float("nan"), float("nan")
     trace["metrics"] = {
@@ -103,7 +105,7 @@ def run_eval_episode(cfg, seed, task, embodiment, encoder, policy_enc, actor,
         "mode_switches": int(trace.get("mode_switches", 0)),
         "task_success": bool(trace["success"]),
         "realized_cmd_ratio": float(trace.get("mean_realized_ratio", float("nan"))),
-        "min_h": float(h_arr.min()) if len(h_arr) else float("nan"),
+        "min_h": float(h_arr.min()) * cm if len(h_arr) else float("nan"),
         "v_le_h_frac": v_le_h,
         "mean_gap": mean_gap,
     }
@@ -119,10 +121,12 @@ def save_eval_figure(trace, out_dir: Path, mode: str, step: int) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     t = np.array(trace["t"])
-    h = np.array(trace["h"])
+    # stored in h_scale (training) units; display in cm
+    cm = 100.0 / float(trace.get("h_scale", 1.0))
+    h = np.array(trace["h"]) * cm
     # V is evaluated at window boundaries (filter cadence), not per tick
     vt = np.array(trace.get("V_t", trace["t"][: len(trace["V"])]))
-    V = np.array(trace["V"])
+    V = np.array(trace["V"]) * cm
     interv = np.array(trace["intervened"])
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
@@ -146,7 +150,7 @@ def save_eval_figure(trace, out_dir: Path, mode: str, step: int) -> Path:
         fontsize=9,
     )
     ax.set_xlabel("t (s)")
-    ax.set_ylabel(f"h / V (x{trace.get('h_scale', 1):g} metres)")
+    ax.set_ylabel("h / V (cm)")
     ax.legend(loc="upper right", fontsize=8)
     fig.tight_layout()
     path = out_dir / f"hv_{mode}_step{step}.png"
@@ -161,7 +165,8 @@ class PanelVideoWriter:
     def __init__(self, path: Path, fps: float = 5.0, h_scale: float = 1.0):
         import imageio.v2 as imageio
 
-        self.h_scale = h_scale
+        # stored h/V are in h_scale (training) units; display in cm
+        self.cm = 100.0 / h_scale
 
         self.writer = imageio.get_writer(
             str(path), fps=fps, codec="libx264", format="FFMPEG",
@@ -172,6 +177,9 @@ class PanelVideoWriter:
     def _panel(self, t, step, n_steps, h, V, control, ratio, extras=None):
         from PIL import Image, ImageDraw
 
+        cm = self.cm
+        h_cm = h * cm
+
         def _cm(val):
             if val is None or not np.isfinite(val):
                 return "  inf "
@@ -181,15 +189,14 @@ class PanelVideoWriter:
         img = Image.new("RGB", (W, H), "white")
         d = ImageDraw.Draw(img)
         color = (200, 60, 40) if control == "FILTER" else (60, 60, 60)
-        unit = f"(x{self.h_scale:g} m)"
         lines = [
             f"t = {t:5.2f} s      step {step}/{n_steps}",
-            f"h        = {h:+.3f} {unit}",
+            f"h        = {h_cm:+.1f} cm",
         ]
         if V is not None and np.isfinite(V):
             lines += [
-                f"Q(s,a_nom)= {V:+.3f} {unit}",
-                f"h - Q    = {h - V:+.3f}",
+                f"Q(s,a_nom)= {V * cm:+.1f} cm",
+                f"h - Q    = {(h - V) * cm:+.1f}",
             ]
         else:
             # warmup / nominal-only: no critic, nothing scored
@@ -241,17 +248,17 @@ class PanelVideoWriter:
             d.text((12, y), skill[:38], fill=(80, 80, 80))
             y += 18
 
-        # scrolling mini-plot of h and V (last ~5 s)
-        self.hist_h.append(h)
-        self.hist_V.append(V)
+        # scrolling mini-plot of h and V (last ~5 s), in cm like the readout
+        self.hist_h.append(h_cm)
+        self.hist_V.append(V * cm if np.isfinite(V) else V)
         hist = self.hist_h[-100:]
         histV = self.hist_V[-100:]
         if len(hist) > 1:
             x0, y0, pw, ph = 12, y + 20, W - 24, 160
             d.rectangle([x0, y0, x0 + pw, y0 + ph], outline=(200, 200, 200))
             finV = [v for v in histV if np.isfinite(v)]
-            lo = min([min(hist), -0.05] + ([min(finV)] if finV else []))
-            hi = max([max(hist), 0.05] + ([max(finV)] if finV else []))
+            lo = min([min(hist), -0.5] + ([min(finV)] if finV else []))
+            hi = max([max(hist), 0.5] + ([max(finV)] if finV else []))
 
             def sy(val):
                 return y0 + ph - (val - lo) / (hi - lo) * ph
