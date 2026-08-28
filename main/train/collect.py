@@ -291,6 +291,8 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
     ep = 0          # schedule slot (advances per KEPT episode)
     attempt = 0     # every rollout attempt (drives the scene seed)
     slot_retries = 0
+    slot_key = None
+    slot_mode = None
     while True:
         if not watch and ep >= cfg.n_episodes:
             break
@@ -318,6 +320,18 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
             elif models is None:
                 print("[collect] follow: no checkpoint yet; collecting nominal")
         task_ep, emb_ep = schedule[ep % len(schedule)]
+        # Success-only retries must NOT re-draw on_path/off_path: the
+        # harder mode (off_path) fails more, so re-drawing would skew the
+        # accepted dataset away from off_path_frac. Pin the slot's mode for
+        # the whole slot (slot_retries and spawn retries both reuse it).
+        # Piper is exempt — it needs the redraws to find any success at all
+        # (and keeps a failed episode at the cap anyway).
+        if ep != slot_key:
+            slot_key = ep
+            slot_mode = None
+            if success_only and emb_ep != "piper":
+                slot_mode = ("off_path" if rng.rand() < cfg.off_path_frac
+                             else "on_path")
         # total spawn guarantee: with h = d_block only, an obstacle-free
         # episode would store h = +inf and NaN the Bellman target — re-draw
         # the slot (keeping the SAME task/embodiment) instead
@@ -325,6 +339,10 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
         for _retry in range(5):
             cfg_ep = sample_scene(cfg, rng, task_ep, emb_ep) \
                 if cfg.randomize_scenes else cfg
+            if slot_mode is not None:
+                import dataclasses
+
+                cfg_ep = dataclasses.replace(cfg_ep, obstacle_mode=slot_mode)
             if cfg_ep.embodiment not in kins:
                 kins[cfg_ep.embodiment] = make_kinematics(CKPT_DIR, cfg_ep.embodiment)
             # behavior policy: filter episodes only when models exist and
