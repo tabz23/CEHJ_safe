@@ -97,8 +97,7 @@ class RolloutController:
                 margin=float(getattr(cfg, "filter_margin", 0.0)) * hs,
                 hold_ticks=int(getattr(cfg, "hj_hold_ticks", 3)),
             )
-        self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": [],
-                      "real_ratio": []}
+        self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": []}
         self._tick_acc = 0.0
         self._orig_step = None
         self._last_ratio = 0.0
@@ -337,10 +336,14 @@ class RolloutController:
             mask = (np.abs(cmd) > 0) & (self._pending["dtheta_max"] > 0)
             denom = float(np.linalg.norm(cmd[mask]))
             if denom > 1e-6:
+                # aggregate as summed norms, not per-tick ratios — per-tick
+                # ratios explode on near-zero commands and skew the mean
                 achieved = qraw_pad - self._pending["qpos_raw"]
-                self.trace["real_ratio"].append(
-                    float(np.linalg.norm(achieved[mask])) / denom
+                self.trace["real_num"] = (
+                    self.trace.get("real_num", 0.0)
+                    + float(np.linalg.norm(achieved[mask]))
                 )
+                self.trace["real_den"] = self.trace.get("real_den", 0.0) + denom
             self.buf.append(self._pending)
         self._pending = entry
 
@@ -420,8 +423,8 @@ class RolloutController:
         self.trace["success"] = success
         self.trace["n_physics"] = self._n_physics
         self.trace["mean_realized_ratio"] = (
-            float(np.mean(self.trace["real_ratio"]))
-            if self.trace["real_ratio"] else float("nan")
+            self.trace.get("real_num", 0.0) / self.trace["real_den"]
+            if self.trace.get("real_den") else float("nan")
         )
         if self.flt is not None:
             self.trace["interventions"] = self.flt.n_interventions
