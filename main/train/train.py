@@ -58,6 +58,15 @@ from main.network.heads import PolicyEncoder, TokenActor, TwinCritic  # noqa: E4
 from main.network.trunk import GeometricTrunk  # noqa: E402
 
 
+def _safe_wandb_log(wandb_run, logs: dict, step: int) -> None:
+    """wandb logging must never crash training — the service process times
+    out occasionally on slow networks (observed killing an eval sweep)."""
+    try:
+        wandb_run.log(logs, step=step)
+    except Exception as exc:
+        print(f"[train] wandb log failed at step {step} ({exc}); continuing")
+
+
 def _t(x, dtype=torch.float32):
     return torch.as_tensor(np.asarray(x), dtype=dtype).cuda()
 
@@ -276,7 +285,7 @@ class Trainer:
                     logs[f"eval/{key}_video"] = wandb.Video(
                         trace["video_path"], format="mp4"
                     )
-                wandb_run.log(logs, step=self.step)
+                _safe_wandb_log(wandb_run, logs, self.step)
         if wandb_run is not None:
             import wandb
 
@@ -311,7 +320,7 @@ class Trainer:
                     slot[k] = beta * slot.get(k, v) + (1 - beta) * v
                     flat[f"eval_ema/{key}/{k}"] = slot[k]
             self._eval_ema = ema
-            wandb_run.log(flat, step=self.step)
+            _safe_wandb_log(wandb_run, flat, self.step)
         return metrics
 
     # ---------- training loop ----------
@@ -348,7 +357,9 @@ class Trainer:
                     f"{sps:.1f} steps/s"
                 )
                 if wandb_run is not None:
-                    wandb_run.log({**m, "steps_per_sec": sps}, step=self.step)
+                    _safe_wandb_log(
+                        wandb_run, {**m, "steps_per_sec": sps}, self.step
+                    )
             if self.step % sweep_every == 0 and self.step > 0:
                 self.evaluate(wandb_run)
 
@@ -419,7 +430,12 @@ def main() -> None:
     if not args.no_wandb:
         import wandb
 
-        run = wandb.init(project="cehj-hjsac", dir=str(args.run))
+        try:
+            run = wandb.init(project="cehj-hjsac", dir=str(args.run))
+        except Exception as exc:
+            # wandb being flaky must never take training down
+            print(f"[train] wandb.init failed ({exc}); continuing offline")
+            run = None
 
     if args.collect_rounds > 0:
         # DAgger loop: train on the current buffer, then collect the next
@@ -482,7 +498,10 @@ def main() -> None:
         trainer.save_checkpoint(args.run / "checkpoint.pt")
         trainer.evaluate(run)
     if run is not None:
-        run.finish()
+        try:
+            run.finish()
+        except Exception as exc:
+            print(f"[train] wandb finish failed ({exc})")
     print("TRAIN DONE")
 
 
