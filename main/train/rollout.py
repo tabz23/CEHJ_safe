@@ -94,7 +94,7 @@ class RolloutController:
                 torch.from_numpy(
                     self.extractor.delta_theta_max.astype(np.float32)
                 ).cuda(),
-                margin=float(getattr(cfg, "filter_margin", 0.01)) * hs,
+                margin=float(getattr(cfg, "filter_margin", 0.0)) * hs,
                 hold_ticks=int(getattr(cfg, "hj_hold_ticks", 3)),
             )
         self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": [],

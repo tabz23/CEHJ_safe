@@ -75,10 +75,10 @@ class FrozenConfig:
                                         # --follow reloads on checkpoint change)
     eval_seeds: tuple = (1000, 1001)
 
-    # deployment filter: single margin, engage when Q(s, a_nom) < margin
-    # (physical m, scaled by h_scale at use). No hysteresis band — the
-    # hj_hold_ticks block provides the commitment.
-    filter_margin: float = 0.01
+    # deployment filter: zero threshold — engage when Q(s, a_nom) < 0
+    # (predicted penetration), release as soon as Q >= 0. No margin, no
+    # hysteresis band — the hj_hold_ticks block provides the commitment.
+    filter_margin: float = 0.0
 
     urdf_hash: str = ""                 # filled at run start
     version: int = 1
