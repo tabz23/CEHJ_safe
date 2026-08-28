@@ -97,7 +97,8 @@ class RolloutController:
                 margin=float(getattr(cfg, "filter_margin", 0.01)) * hs,
                 hold_ticks=int(getattr(cfg, "hj_hold_ticks", 3)),
             )
-        self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": []}
+        self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": [],
+                      "real_ratio": []}
         self._tick_acc = 0.0
         self._orig_step = None
         self._last_ratio = 0.0
@@ -329,6 +330,17 @@ class RolloutController:
             # tick that produced this state (registered by the tick hook)
             self._pending["dtheta"] = dtheta_pad
             self._pending["action_source"] = np.int8(self._tick_source)
+            # realized-vs-commanded: how much of the stored command the
+            # drive actually achieved (low ratio = the critic's action
+            # semantics drift from physics)
+            cmd = dtheta_pad
+            mask = (np.abs(cmd) > 0) & (self._pending["dtheta_max"] > 0)
+            denom = float(np.linalg.norm(cmd[mask]))
+            if denom > 1e-6:
+                achieved = qraw - self._pending["qpos_raw"]
+                self.trace["real_ratio"].append(
+                    float(np.linalg.norm(achieved[mask])) / denom
+                )
             self.buf.append(self._pending)
         self._pending = entry
 
@@ -407,6 +419,10 @@ class RolloutController:
             self._flush_pending()
         self.trace["success"] = success
         self.trace["n_physics"] = self._n_physics
+        self.trace["mean_realized_ratio"] = (
+            float(np.mean(self.trace["real_ratio"]))
+            if self.trace["real_ratio"] else float("nan")
+        )
         if self.flt is not None:
             self.trace["interventions"] = self.flt.n_interventions
             self.trace["intervention_rate"] = self.flt.intervention_rate

@@ -25,3 +25,6 @@ venv/
 runs/
 nominal_cache/
 data/wandb/
+
+# Training data (memmap buffers)
+data/

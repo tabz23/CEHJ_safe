@@ -59,10 +59,12 @@ FIELDS = {
 
 # Fields read at sample time. `_next` needs only the observation side;
 # splitting avoids reading every field twice (the throughput ceiling).
+# `h` is read at both t (Bellman backup) and t+ 1 (collision precision/recall
+# ground truth) — adding it here only affects sampling, not the memmap layout.
 NEXT_FIELDS = (
     "state_tokens", "body_tokens", "link_pos", "body_mask",
     "joint_index", "scene_tokens", "scene_pos",
-    "Jlin", "Jang", "dtheta_max",
+    "Jlin", "Jang", "dtheta_max", "h",
 )
 CUR_FIELDS = NEXT_FIELDS + ("h", "dtheta", "embodiment_id", "task_id",
                             "action_source")

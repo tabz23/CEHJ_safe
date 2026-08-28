@@ -372,6 +372,7 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
             ro.video = video
         n_before = len(buf)
         success = False
+        trace = {}
         try:
             trace = ro.run()
             success = bool(trace["success"])
@@ -422,7 +423,8 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
         n_written = len(buf)
         print(
             f"ep {ep} done: success={success} "
-            f"steps={n_written} ({n_written / (time.time() - t_start):.1f}/s)"
+            f"steps={n_written} ({n_written / (time.time() - t_start):.1f}/s) "
+            f"realized/cmd={trace.get('mean_realized_ratio', float('nan')):.2f}"
         )
         buf.flush()
         ep += 1

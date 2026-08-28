@@ -248,6 +248,22 @@ class Trainer:
             out["data/action_std"] = float(
                 (dtheta.std(dim=0) * jmask).sum() / jmask.sum().clamp_min(1)
             )
+        # collision precision/recall: predicted unsafe = Q(s,a) below the
+        # filter margin; ground truth = next state actually violated (h < 0,
+        # h is stored in h_scale units like the margin). The filter's core
+        # quality signal — moves long before success rate does.
+        h_next = _t(b["h_next"])
+        margin = float(cfg.filter_margin) * float(cfg.h_scale)
+        pred_unsafe = qmin < margin
+        true_unsafe = h_next < 0
+        n_pred = float(pred_unsafe.sum())
+        n_true = float(true_unsafe.sum())
+        out["q/precision"] = float(
+            (pred_unsafe & true_unsafe).sum() / max(n_pred, 1e-9)
+        )
+        out["q/recall"] = float(
+            (pred_unsafe & true_unsafe).sum() / max(n_true, 1e-9)
+        )
         # per-embodiment / per-task splits: free — both ids ride in the batch
         emb_ids = np.asarray(b["embodiment_id"])
         task_ids = np.asarray(b["task_id"])
