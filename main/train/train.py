@@ -392,6 +392,9 @@ def main() -> None:
                    help="200 epochs x 1024 by default")
     p.add_argument("--eval-every", type=int, default=1024,
                    help="grad steps per epoch (test runs: 50)")
+    p.add_argument("--eval-sweep-every-epochs", type=int, default=10,
+                   help="rollout sweep every N epochs (a sweep is 5 full "
+                        "episodes); set 1 for short test runs")
     p.add_argument("--collect-rounds", type=int, default=0,
                    help=">0: DAgger loop — collect N rounds (round 0 "
                         "nominal-only, later rounds cfg.filter_episode_frac "
@@ -419,41 +422,56 @@ def main() -> None:
         run = wandb.init(project="cehj-hjsac", dir=str(args.run))
 
     if args.collect_rounds > 0:
-        # DAgger loop: alternate collection (with current weights) and
-        # training on the growing buffer, sized up front for all rounds
+        # DAgger loop: train on the current buffer, then collect the next
+        # round with the UPDATED weights (filter episodes per
+        # cfg.filter_episode_frac), then train again. If the data dir already
+        # holds a warmup buffer (collect.py --success-only), it is reused
+        # directly and round 0 trains on it first; otherwise round 0
+        # collects a nominal-only warmup first. Buffer capacity is sized up
+        # front for all rounds when created here.
         import dataclasses
 
         from main.train.collect import collect
 
         cfg = FrozenConfig()
         cfg.eval_every = args.eval_every
+        cfg.eval_sweep_every_epochs = args.eval_sweep_every_epochs
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
         n_ep = args.episodes_per_round or (
             len(cfg.task_choices) * len(cfg.embodiment_choices)
         )
-        capacity = (args.collect_rounds * n_ep
-                    * (cfg.max_steps_per_episode + 2))
+        warmup_exists = (args.data / "buffer" / "header.json").exists()
+        n_collects = args.collect_rounds + (0 if warmup_exists else 1)
+        capacity = (n_collects * n_ep
+                    * (cfg.max_steps_per_episode + 2)) if not warmup_exists else None
         trainer = Trainer(cfg, args.data, args.run, create_capacity=capacity)
         if args.init_from is not None:
             trainer.load_checkpoint(args.init_from)
         if run is not None:
             run.config.update(cfg.to_dict())
+        # warmup ids were assigned by the standalone collector; keep round
+        # ids clear of them (ids are diagnostic only)
+        id_base = 10_000 if warmup_exists else 0
+        if not warmup_exists:
+            cfg_w = dataclasses.replace(cfg, n_episodes=n_ep)
+            collect(cfg_w, args.data, buf=trainer.buf, episode_offset=0,
+                    encoder=trainer._eval_encoder, models=None,
+                    round_index=0)
         for r in range(args.collect_rounds):
-            models = None if r == 0 else (
-                trainer.policy_enc, trainer.actor, trainer.critics
-            )
-            cfg_r = dataclasses.replace(cfg, n_episodes=n_ep)
-            collect(cfg_r, args.data, buf=trainer.buf,
-                    episode_offset=r * n_ep,
-                    encoder=trainer._eval_encoder, models=models,
-                    round_index=r)
             trainer.train_steps(args.grad_steps_per_round, run)
             trainer.save_checkpoint(args.run / "checkpoint.pt")
+            models = (trainer.policy_enc, trainer.actor, trainer.critics)
+            cfg_r = dataclasses.replace(cfg, n_episodes=n_ep)
+            collect(cfg_r, args.data, buf=trainer.buf,
+                    episode_offset=id_base + r * n_ep,
+                    encoder=trainer._eval_encoder, models=models,
+                    round_index=r + 1)
         trainer.evaluate(run)
     else:
         cfg = FrozenConfig.load(args.data / "config.json")
         cfg.grad_steps = args.grad_steps
         cfg.eval_every = args.eval_every
+        cfg.eval_sweep_every_epochs = args.eval_sweep_every_epochs
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
         if run is not None:
             run.config.update(cfg.to_dict())
