@@ -130,8 +130,21 @@ class RoundMetrics:
             plt.close(fig)
 
         if wandb_run is not None:
+            import wandb
+
             from main.train.train import _safe_wandb_log
 
+            # heatmaps + trends as images so they are visible in the run
+            imgs = {}
+            for metric in METRICS:
+                mdir = out_dir / metric
+                heat = mdir / f"{tag}.png"
+                if heat.exists():
+                    imgs[f"heatmap/{metric}"] = wandb.Image(str(heat))
+                trend = mdir / "trend.png"
+                if trend.exists():
+                    imgs[f"trend/{metric}"] = wandb.Image(str(trend))
+            _safe_wandb_log(wandb_run, imgs, step)
             _safe_wandb_log(
                 wandb_run,
                 {f"round_overview/{k}": v for k, v in overall.items()},
