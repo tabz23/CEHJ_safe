@@ -224,7 +224,7 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
             follow: Path | None = None, capacity: int | None = None,
             success_only: bool = False, max_slot_retries: int = 0,
             record_video: bool = False, metrics=None,
-            video_dir=None) -> Path:
+            video_dir=None, video_filter_only: bool = False) -> Path:
     """Collect episodes with the run.py-style controller stack
     (TickChunkedController) via RolloutController mode='collect'. Per-tick
     encoder tokens + body features + h are written to the buffer; dtheta is
@@ -361,7 +361,9 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
               f"{cfg_ep.obstacle_model} / {cfg_ep.obstacle_mode} / "
               f"{'FILTER' if use_filter else 'nominal'}")
         video = None
-        if record_video:
+        # video_filter_only: record only filter-active episodes (nominal-only
+        # episodes carry no filter signal — training wants those videos)
+        if record_video and (use_filter or not video_filter_only):
             from main.train.eval_utils import PanelVideoWriter
 
             vid_dir = Path(video_dir) if video_dir else out_root / "videos"

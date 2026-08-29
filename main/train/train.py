@@ -550,7 +550,8 @@ def main() -> None:
                     episode_offset=id_base + r * n_ep,
                     encoder=trainer._eval_encoder, models=models,
                     round_index=r + 1, metrics=rmet,
-                    record_video=True, video_dir=vid_dir)
+                    record_video=True, video_dir=vid_dir,
+                    video_filter_only=True)
             overall = rmet.render(
                 args.run / "eval", tag=f"round{r + 1:03d}",
                 tasks=list(cfg.task_choices),
