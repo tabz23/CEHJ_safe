@@ -245,6 +245,7 @@ class Trainer:
             "loss_q": float(loss_q), "loss_pi": float(loss_pi),
             "alpha": alpha, "gamma": gamma,
             "mean_q": float(qmin.mean()), "mean_h": float(h.mean()),
+            "min_h": float(h.min()),  # worst-case clearance in the batch
             "mean_gap_h_q": float((h - qmin).mean()),
             "entropy": float(-logp.mean()),
             "gn_critic": float(gn_c), "gn_actor": float(gn_a),
@@ -563,15 +564,18 @@ def main() -> None:
             if run is not None and vid_dir.exists():
                 import wandb
 
-                vlogs = {}
+                # one panel per round: a LIST of videos under a single key —
+                # wandb renders it as a carousel with a slider (plus the
+                # step slider across rounds), not one cell per episode
+                vids = []
                 for v in sorted(vid_dir.glob("*.mp4")):
                     if v.name not in logged_vids:
                         logged_vids.add(v.name)
-                        vlogs[f"round_video/{v.stem}"] = wandb.Video(
-                            str(v), format="mp4"
-                        )
-                if vlogs:
-                    _safe_wandb_log(run, vlogs, trainer.step)
+                        vids.append(wandb.Video(str(v), format="mp4",
+                                                caption=v.stem))
+                if vids:
+                    _safe_wandb_log(run, {"round_videos": vids},
+                                    trainer.step)
         # final render (all rounds accumulated) instead of the removed sweep
         rmet.render(args.run / "eval", tag="final",
                     tasks=list(cfg.task_choices),
