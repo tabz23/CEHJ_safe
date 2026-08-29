@@ -223,7 +223,8 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
             round_index: int = 0, watch: bool = False,
             follow: Path | None = None, capacity: int | None = None,
             success_only: bool = False, max_slot_retries: int = 0,
-            record_video: bool = False, metrics=None) -> Path:
+            record_video: bool = False, metrics=None,
+            video_dir=None) -> Path:
     """Collect episodes with the run.py-style controller stack
     (TickChunkedController) via RolloutController mode='collect'. Per-tick
     encoder tokens + body features + h are written to the buffer; dtheta is
@@ -363,7 +364,7 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
         if record_video:
             from main.train.eval_utils import PanelVideoWriter
 
-            vid_dir = out_root / "videos"
+            vid_dir = Path(video_dir) if video_dir else out_root / "videos"
             vid_dir.mkdir(parents=True, exist_ok=True)
             video = PanelVideoWriter(
                 vid_dir / (f"ep{ep:04d}_a{attempt:03d}_"

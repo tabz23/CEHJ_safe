@@ -539,6 +539,8 @@ def main() -> None:
             collect(cfg_w, args.data, buf=trainer.buf, episode_offset=0,
                     encoder=trainer._eval_encoder, models=None,
                     round_index=0)
+        vid_dir = args.run / "eval" / "videos"
+        logged_vids: set[str] = set()
         for r in range(args.collect_rounds):
             trainer.train_steps(args.grad_steps_per_round, run)
             trainer.save_checkpoint(args.run / "checkpoint.pt")
@@ -547,7 +549,8 @@ def main() -> None:
             collect(cfg_r, args.data, buf=trainer.buf,
                     episode_offset=id_base + r * n_ep,
                     encoder=trainer._eval_encoder, models=models,
-                    round_index=r + 1, metrics=rmet)
+                    round_index=r + 1, metrics=rmet,
+                    record_video=True, video_dir=vid_dir)
             overall = rmet.render(
                 args.run / "eval", tag=f"round{r + 1:03d}",
                 tasks=list(cfg.task_choices),
@@ -556,6 +559,18 @@ def main() -> None:
             )
             print(f"[round {r + 1}] overall: "
                   + " ".join(f"{k}={v:.3f}" for k, v in overall.items()))
+            if run is not None and vid_dir.exists():
+                import wandb
+
+                vlogs = {}
+                for v in sorted(vid_dir.glob("*.mp4")):
+                    if v.name not in logged_vids:
+                        logged_vids.add(v.name)
+                        vlogs[f"round_video/{v.stem}"] = wandb.Video(
+                            str(v), format="mp4"
+                        )
+                if vlogs:
+                    _safe_wandb_log(run, vlogs, trainer.step)
         # final render (all rounds accumulated) instead of the removed sweep
         rmet.render(args.run / "eval", tag="final",
                     tasks=list(cfg.task_choices),
