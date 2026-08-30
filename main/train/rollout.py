@@ -148,7 +148,7 @@ class RolloutController:
         if self.flt is None or not self.filter_active:
             return False
 
-        body, enc = self._model_inputs(self.env.get_encoder_obs(self.kin))
+        body, enc = self._policy_inputs_cached()
         a_nom_t = torch.from_numpy(self._tick_action.astype(np.float32))[None].cuda()
         with torch.no_grad():
             q_nom = float(self.flt.q_nom(
@@ -167,7 +167,7 @@ class RolloutController:
         # intervention: actor drives hj_hold_ticks, re-queried every tick
         self._engaged_ticks = getattr(self, "_engaged_ticks", 0)
         for k in range(self.flt.hold_ticks):
-            body, enc = self._model_inputs(self.env.get_encoder_obs(self.kin))
+            body, enc = self._policy_inputs_cached()
             with torch.no_grad():
                 a = self.flt.actor_action(enc)
             a_np = a[0].cpu().numpy()
@@ -211,8 +211,23 @@ class RolloutController:
         t_now = self._n_physics / self.env.PHYSICS_FREQ
         self.trace["t"].append(t_now)
         self.trace["h"].append(float(h))
+        # encode ONCE per tick: the buffer write, the hook's Q(s, a_nom) eval
+        # (same sim state — the hook fires at this exact boundary), and the
+        # actor all consume this encoding
+        encoded = self._encode_obs(obs)
         if self.mode == "collect" and self.buf is not None:
-            self._collect_tick(obs, h, diag)
+            self._collect_tick(obs, h, diag, encoded)
+        if self.flt is not None and self.filter_active:
+            tokens, pos_mean, state, body = encoded
+            with torch.no_grad():
+                enc = self.policy_enc(
+                    state, body["body_tokens"][None], body["link_pos"][None],
+                    body["body_mask"][None], body["joint_index"][None],
+                    tokens, pos_mean,
+                )
+            self._obs_cache = (self._n_physics, body, enc)
+        else:
+            self._obs_cache = None
         if self.video is not None and t_now >= self._next_frame_t - 1e-9:
             # sim-time-based frame capture: 10 fps of simulation
             self._next_frame_t = t_now + 1.0 / self.video_fps
@@ -248,7 +263,7 @@ class RolloutController:
             )
         return obs
 
-    def _collect_tick(self, obs, h, diag):
+    def _collect_tick(self, obs, h, diag, encoded):
         """Stash this state; the previous stashed entry is finalized with the
         COMMANDED action of the tick that led here (planner a_nom, actor
         dtheta, or sampled perturbation — action_source marks which) and
@@ -260,16 +275,9 @@ class RolloutController:
         recompute them from qpos at sample time."""
         from main.train.buffer import MAX_ACTION, MAX_STATE_TOKENS
 
-        with torch.no_grad():
-            tokens, pos_mean, _ = self.encoder.encode_visual_tokens(
-                obs["imgs"], obs["depths"], obs["image_wh"], obs["projection_mat"],
-                out_extrinsic=obs["T_ego2world"],  # ego -> world metres
-            )
-            state = self.encoder.encode_joint_angles(
-                obs["joint_state"], self.kin,
-                embodiedment_mat=obs["T_base2ego"],  # ego-frame FK (HoloBrain)
-            ).squeeze(2)[0]
-        body = self.extractor.extract()
+        # encoding comes from _capture_tick (computed once per tick)
+        tokens, pos_mean, state, body = encoded
+        state = state[0]                            # [N, D], drop batch
         per_link = np.zeros(20, dtype=np.float32)
         names = [f"L/{n}" for n in self.extractor.spec.link_names] + [
             f"R/{n}" for n in self.extractor.spec.link_names
@@ -360,7 +368,24 @@ class RolloutController:
             self.buf.append(self._pending)
             self._pending = None
 
-    def _model_inputs(self, obs):
+    def _policy_inputs_cached(self):
+        """Body features + policy encoding for the current state, reusing the
+        capture's computation when it is at most one tick old. The boundary
+        capture normally fires at the exact chunk end; after intervention
+        blocks the plan cursor and the global step counter can sit a few
+        physics steps apart, so the freshest capture may lag the hook by
+        < one tick (<= 12 ms of sim — the state barely moves, and the Q
+        trigger tolerates it; a_nom is always computed from LIVE qpos)."""
+        cache = getattr(self, "_obs_cache", None)
+        spt = self.ctrl.steps_per_tick
+        if cache is not None and 0 <= self._n_physics - cache[0] <= spt:
+            return cache[1], cache[2]
+        return self._model_inputs(self.env.get_encoder_obs(self.kin))
+
+    def _encode_obs(self, obs):
+        """obs -> (tokens, pos_mean, state, body) — the frozen encoder plus
+        analytic body features. Runs ONCE per tick; the buffer write and the
+        policy encoding both consume this (see _capture_tick)."""
         with torch.no_grad():
             tokens, pos_mean, _ = self.encoder.encode_visual_tokens(
                 obs["imgs"], obs["depths"], obs["image_wh"], obs["projection_mat"],
@@ -369,8 +394,13 @@ class RolloutController:
             state = self.encoder.encode_joint_angles(
                 obs["joint_state"], self.kin,
                 embodiedment_mat=obs["T_base2ego"],
-            ).squeeze(2)
+            ).squeeze(2)                          # [B, N, D]
             body = self.extractor.extract()
+        return tokens, pos_mean, state, body
+
+    def _model_inputs(self, obs):
+        tokens, pos_mean, state, body = self._encode_obs(obs)
+        with torch.no_grad():
             enc = self.policy_enc(
                 state, body["body_tokens"][None], body["link_pos"][None],
                 body["body_mask"][None], body["joint_index"][None],
@@ -393,7 +423,10 @@ class RolloutController:
                     f"rollout exceeded {self.max_steps} physics steps"
                 )
             self._tick_acc += env.control_freq / env.PHYSICS_FREQ
-            if self._tick_acc >= 1.0:
+            # epsilon: 10x float(0.1) sums to 0.9999999999999999 — without the
+            # epsilon the capture drifts one physics step late and the hook's
+            # obs cache never hits
+            if self._tick_acc >= 1.0 - 1e-9:
                 self._tick_acc -= 1.0
                 self._capture_tick()
 
