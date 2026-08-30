@@ -48,6 +48,11 @@ def compute_trace_metrics(trace: dict, h_scale: float,
         "violation_rate": float((h_arr < 0).mean()) if len(h_arr) else float("nan"),
         "violation_force": violation_force,
         "violation_any": violation_any,
+        "contact_force_max": float(force.max()) if len(force) else float("nan"),
+        "contact_force_mean_nz": (
+            float(force[force > 0].mean())
+            if len(force) and (force > 0).any() else 0.0
+        ),
         "intervention_rate": float(trace.get("intervention_rate", 0.0)),
         "mode_switches": int(trace.get("mode_switches", 0)),
         "task_success": bool(trace["success"]),
@@ -260,6 +265,12 @@ class PanelVideoWriter:
             y += 18
             argmin = extras.get("true_argmin") or "-"
             d.text((12, y), f"argmin: {argmin}", fill=(0, 0, 0))
+            y += 18
+            # contact force to the obstacle (N); red above the collision
+            # threshold (20 N — real contacts in sim are >= 79 N)
+            force = extras.get("contact_force", 0.0) or 0.0
+            f_color = (200, 60, 40) if force >= 20.0 else (60, 60, 60)
+            d.text((12, y), f"force = {force:5.1f} N", fill=f_color)
             y += 18
             # HOLD line with provenance, same format as record.py's recorder
             dbg = extras.get("hold_debug") or {}

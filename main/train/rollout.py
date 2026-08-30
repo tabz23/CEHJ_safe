@@ -257,6 +257,7 @@ class RolloutController:
                 "holding_right": diag.get("holding_right", ""),
                 "hold_debug": diag.get("hold_debug", {}),
                 "contact": diag.get("contact", False),
+                "contact_force": diag.get("contact_force", 0.0),
                 "block": self._block_info,
                 # cumulative actor intervention so far: (ticks, seconds)
                 "intervened": (self._engaged_ticks,

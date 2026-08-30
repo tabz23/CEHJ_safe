@@ -23,6 +23,7 @@ import numpy as np
 METRICS = (
     "task_success", "violation_rate", "violation_force", "violation_any",
     "intervention_rate", "mode_switches",
+    "contact_force_max", "contact_force_mean_nz",
     "min_h", "mean_gap", "v_le_h_frac", "realized_cmd_ratio",
 )
 
