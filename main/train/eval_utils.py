@@ -160,6 +160,13 @@ def save_eval_figure(trace, out_dir: Path, mode: str, step: int) -> Path:
     if interv.any():
         ax.fill_between(vt, h.min(), h.max(), where=interv,
                         color="tab:orange", alpha=0.15, label="filter active")
+    # contact force, normalized to its own max (alignment with h dips is
+    # the point, not the scale); floored at the 20 N collision threshold
+    force = np.array(trace.get("contact_force", []))
+    if len(force) == len(t) and len(force):
+        fmax = max(float(force.max()), 20.0)
+        ax.plot(t, force / fmax * max(float(h.max()), 1e-6),
+                label="F (norm)", color="orange", lw=1.2)
     m = trace["metrics"]
     scene = trace.get("scene", {})
     scene_str = (f"{scene.get('embodiment', '?')}/{scene.get('task', '?')}"
@@ -194,6 +201,7 @@ class PanelVideoWriter:
             pixelformat="yuv420p", macro_block_size=1,
         )
         self.hist_h, self.hist_V, self.hist_int = [], [], []
+        self.hist_F = []  # contact force (normalized in the mini-plot)
 
     def _panel(self, t, step, n_steps, h, V, control, ratio, extras=None):
         from PIL import Image, ImageDraw
@@ -285,11 +293,15 @@ class PanelVideoWriter:
             d.text((12, y), skill[:38], fill=(80, 80, 80))
             y += 18
 
-        # scrolling mini-plot of h and V (last ~5 s), in cm like the readout
+        # scrolling mini-plot of h, V and contact force (last ~5 s);
+        # h/V in cm like the readout, force normalized to the plot box
+        # (alignment with h dips is what matters, not the scale)
         self.hist_h.append(h_cm)
         self.hist_V.append(V * cm if np.isfinite(V) else V)
+        self.hist_F.append(extras.get("contact_force", 0.0) if extras else 0.0)
         hist = self.hist_h[-100:]
         histV = self.hist_V[-100:]
+        histF = self.hist_F[-100:]
         if len(hist) > 1:
             x0, y0, pw, ph = 12, y + 20, W - 24, 160
             d.rectangle([x0, y0, x0 + pw, y0 + ph], outline=(200, 200, 200))
@@ -316,8 +328,15 @@ class PanelVideoWriter:
                     seg = []
             if len(seg) > 1:
                 d.line(seg, fill=(220, 60, 50), width=2)
+            # contact force, normalized to the window (floor at the 20 N
+            # collision threshold so scale never amplifies noise)
+            fmax = max(max(histF), 20.0)
+            pts_f = [(x0 + i / (n - 1) * pw, y0 + ph - (v / fmax) * ph)
+                     for i, v in enumerate(histF)]
+            d.line(pts_f, fill=(230, 150, 30), width=2)
             d.text((x0 + 4, y0 + 4), "h", fill=(30, 100, 200))
             d.text((x0 + 20, y0 + 4), "V", fill=(220, 60, 50))
+            d.text((x0 + 36, y0 + 4), "F", fill=(230, 150, 30))
         return img
 
     def add(self, frame_rgb, t, step, n_steps, h, V, control, ratio, extras=None):
