@@ -106,6 +106,7 @@ class StepBuffer:
         else:
             self._shapes = dict(self.header.get("shapes", {}))
         self.n = int(self.header.get("n", 0))
+        self.head = int(self.header.get("head", self.n))  # next write position
         self._valid_t: np.ndarray | None = None
 
     def _create(self, name: str, value: np.ndarray) -> np.ndarray:
@@ -120,7 +121,8 @@ class StepBuffer:
         return arr
 
     def append(self, step: dict) -> None:
-        assert self.n < self.capacity, "buffer full"
+        """Ring semantics: at capacity the OLDEST transition is overwritten
+        (warmup data ages out first). Never raises 'buffer full'."""
         for name, value in step.items():
             value = np.asarray(value)
             arr = self.arrays.get(name)
@@ -136,9 +138,11 @@ class StepBuffer:
                 arr = None
             if arr is None:
                 arr = self._create(name, value)
-            arr[self.n] = value
-        self.n += 1
+            arr[self.head] = value
+        self.head = (self.head + 1) % self.capacity
+        self.n = min(self.n + 1, self.capacity)
         self.header["n"] = self.n
+        self.header["head"] = self.head
         self._valid_t = None  # invalidate the sample cache
 
     def flush(self) -> None:
@@ -151,7 +155,7 @@ class StepBuffer:
         tmp.replace(self.root / "header.json")
 
     def refresh(self) -> int:
-        """Re-read n from the header and invalidate the sample cache.
+        """Re-read n/head from the header and invalidate the sample cache.
 
         For async collection: the collector process appends to the same
         memmaps and flushes per episode; the trainer calls refresh() every
@@ -165,18 +169,24 @@ class StepBuffer:
         except (OSError, json.JSONDecodeError):
             return self.n  # mid-rename or partially written; keep last n
         n = int(header.get("n", self.n))
-        if n != self.n:
+        head = int(header.get("head", self.head))
+        if n != self.n or head != self.head:
             self.n = n
+            self.head = head
             self._valid_t = None
         return self.n
 
     def discard_to(self, n: int) -> None:
         """Roll back to n rows (drop the tail in place). Success-only
-        collection uses this to drop a failed episode after the fact."""
+        collection uses this to drop a failed episode after the fact.
+        Only valid before the ring has ever wrapped."""
         n = int(n)
         assert 0 <= n <= self.n, f"discard_to({n}) with only {self.n} rows"
+        assert self.head == self.n, "discard_to after the ring wrapped"
         self.n = n
+        self.head = n
         self.header["n"] = n
+        self.header["head"] = n
         self._valid_t = None
 
     def __len__(self) -> int:
@@ -197,17 +207,42 @@ class StepBuffer:
         """Cached list of t where (t, t+1) stays inside one episode and,
         if an embodiment filter is set, belongs to an allowed embodiment
         (t and t+1 share an episode, hence an embodiment — masking t
-        suffices)."""
+        suffices). Ring-aware: pairs crossing the write head (where the
+        oldest slot meets the newest) are excluded."""
         if self._valid_t is None:
-            ep = self.arrays["episode_id"][: self.n]
-            done = self.arrays["done"][: self.n]
-            mask = (ep[:-1] == ep[1:]) & ~done[:-1]
+            wrapped = self.n == self.capacity
+            hi = self.capacity if wrapped else self.n
+            ep = self.arrays["episode_id"][:hi]
+            done = self.arrays["done"][:hi]
+            ep_next = np.roll(ep, -1)
+            mask = (ep == ep_next) & ~done
+            mask[-1] = False                    # never pair last -> first
+            if wrapped:
+                mask[self.head - 1] = False     # seam: newest -> oldest
+            else:
+                mask[self.n - 1:] = False
             emb_filter = getattr(self, "_emb_filter", None)
             if emb_filter is not None:
-                emb = self.arrays["embodiment_id"][: self.n]
-                mask &= np.isin(emb[:-1], emb_filter)
+                emb = self.arrays["embodiment_id"][:hi]
+                mask &= np.isin(emb, emb_filter)
             self._valid_t = np.nonzero(mask)[0]
         return self._valid_t
+
+    def seed_from(self, src_dir) -> None:
+        """Copy every row from another buffer into this one — seeds the
+        training ring from a reusable, separately-collected warmup buffer.
+        The warmup buffer is never written to; when the ring fills, warmup
+        rows are the oldest and get evicted first."""
+        src = StepBuffer(src_dir)
+        assert self.n == 0, "seed_from into a non-empty buffer"
+        for name, arr in src.arrays.items():
+            dst = self._create(name, np.asarray(arr[0]))
+            dst[: src.n] = arr[: src.n]
+            dst.flush()
+        self.n = self.head = src.n
+        self.header["n"] = src.n
+        self.header["head"] = src.n
+        self.flush()
 
     def sample(self, batch: int, rng: np.random.RandomState | None = None) -> dict:
         """Sample (t, t+1) pairs; pairs never cross an episode boundary.
@@ -220,9 +255,10 @@ class StepBuffer:
         if len(valid_t) == 0:
             raise RuntimeError("no valid transitions yet")
         idx = rng.choice(valid_t, size=min(batch, len(valid_t)), replace=len(valid_t) < batch)
+        idx_next = (idx + 1) % self.capacity  # ring wrap
         out = {}
         for name in CUR_FIELDS:
             out[name] = np.asarray(self.arrays[name][idx])
         for name in NEXT_FIELDS:
-            out[name + "_next"] = np.asarray(self.arrays[name][idx + 1])
+            out[name + "_next"] = np.asarray(self.arrays[name][idx_next])
         return out

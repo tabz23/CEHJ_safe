@@ -482,6 +482,9 @@ def main() -> None:
                    help="leave-one-out phase 1: exclude this embodiment")
     p.add_argument("--only-embodiment", default=None,
                    help="leave-one-out phase 2: train ONLY this embodiment")
+    p.add_argument("--init-buffer", type=Path, default=None,
+                   help="seed the (empty) training buffer from this warmup "
+                        "buffer dir; the warmup buffer is never written")
     p.add_argument("--buffer-dir", type=Path, default=None,
                    help="memmap location (default <data>/buffer); use local "
                         "disk — sampling is the training hot path")
@@ -528,6 +531,9 @@ def main() -> None:
                     * (cfg.max_steps_per_episode + 2)) if not warmup_exists else None
         trainer = Trainer(cfg, args.data, args.run, create_capacity=capacity,
                                   buffer_dir=args.buffer_dir)
+        if args.init_buffer is not None and len(trainer.buf) == 0:
+            print(f"[train] seeding buffer from {args.init_buffer}")
+            trainer.buf.seed_from(args.init_buffer)
         if args.init_from is not None:
             trainer.load_checkpoint(args.init_from)
         if run is not None:
@@ -596,6 +602,9 @@ def main() -> None:
         if run is not None:
             run.config.update(cfg.to_dict())
         trainer = Trainer(cfg, args.data, args.run, buffer_dir=args.buffer_dir)
+        if args.init_buffer is not None and len(trainer.buf) == 0:
+            print(f"[train] seeding buffer from {args.init_buffer}")
+            trainer.buf.seed_from(args.init_buffer)
         if args.init_from is not None:
             trainer.load_checkpoint(args.init_from)
         trainer.train_steps(cfg.grad_steps, run)
