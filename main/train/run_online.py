@@ -44,12 +44,17 @@ def main() -> None:
     p.add_argument("--success-only", action="store_true",
                    help="warmup keeps only successful episodes (failures "
                         "rolled back and retried; piper cap 10, others 50)")
+    p.add_argument("--buffer-dir", type=Path, default=None,
+                   help="memmap location (default <data>/buffer); use local "
+                        "disk — sampling is the training hot path")
     p.add_argument("--no-wandb", action="store_true")
     args = p.parse_args()
     args.data = args.data.resolve()
     args.run = args.run.resolve()
 
     sel = []
+    if args.buffer_dir:
+         sel += ["--buffer-dir", str(args.buffer_dir)]
     if args.leave_out:
         sel += ["--leave-out", args.leave_out]
     if args.only_embodiment:
@@ -80,6 +85,7 @@ def main() -> None:
     try:
         cmd = [sys.executable, "main/train/train.py",
                "--data", str(args.data), "--run", str(args.run),
+               *(["--buffer-dir", str(args.buffer_dir)] if args.buffer_dir else []),
                "--grad-steps", str(args.grad_steps),
                "--eval-every", str(args.eval_every)]
         if args.leave_out:

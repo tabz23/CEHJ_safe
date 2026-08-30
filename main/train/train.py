@@ -73,7 +73,7 @@ def _t(x, dtype=torch.float32):
 
 class Trainer:
     def __init__(self, cfg: FrozenConfig, data_root: Path, run_dir: Path,
-                 create_capacity: int | None = None):
+                 create_capacity: int | None = None, buffer_dir=None):
         self.cfg = cfg
         # resolve NOW: RoboTwin chdirs during env creation; a relative run
         # dir would scatter checkpoint/eval files under the RoboTwin root
@@ -81,7 +81,10 @@ class Trainer:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         cfg.save(self.run_dir / "config.json")
 
-        buf_dir = Path(data_root) / "buffer"
+        # buffer_dir override: sampling reads ~80 MB/grad-step — the memmap
+        # belongs on LOCAL disk (network FS reads stall training)
+        buf_dir = (Path(buffer_dir).resolve() if buffer_dir
+                   else Path(data_root) / "buffer")
         if not (buf_dir / "header.json").exists():
             # DAgger from scratch: size the buffer across ALL rounds up front
             # (open_memmap allocates at fixed capacity; append asserts on it)
@@ -479,6 +482,9 @@ def main() -> None:
                    help="leave-one-out phase 1: exclude this embodiment")
     p.add_argument("--only-embodiment", default=None,
                    help="leave-one-out phase 2: train ONLY this embodiment")
+    p.add_argument("--buffer-dir", type=Path, default=None,
+                   help="memmap location (default <data>/buffer); use local "
+                        "disk — sampling is the training hot path")
     p.add_argument("--init-from", type=Path, default=None,
                    help="load weights from a previous checkpoint "
                         "(e.g. the 4-embodiment phase-1 run) before training")
@@ -520,7 +526,8 @@ def main() -> None:
         n_collects = args.collect_rounds + (0 if warmup_exists else 1)
         capacity = (n_collects * n_ep
                     * (cfg.max_steps_per_episode + 2)) if not warmup_exists else None
-        trainer = Trainer(cfg, args.data, args.run, create_capacity=capacity)
+        trainer = Trainer(cfg, args.data, args.run, create_capacity=capacity,
+                                  buffer_dir=args.buffer_dir)
         if args.init_from is not None:
             trainer.load_checkpoint(args.init_from)
         if run is not None:
@@ -588,7 +595,7 @@ def main() -> None:
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
         if run is not None:
             run.config.update(cfg.to_dict())
-        trainer = Trainer(cfg, args.data, args.run)
+        trainer = Trainer(cfg, args.data, args.run, buffer_dir=args.buffer_dir)
         if args.init_from is not None:
             trainer.load_checkpoint(args.init_from)
         trainer.train_steps(cfg.grad_steps, run)

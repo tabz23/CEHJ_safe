@@ -224,7 +224,8 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
             follow: Path | None = None, capacity: int | None = None,
             success_only: bool = False, max_slot_retries: int = 0,
             record_video: bool = False, metrics=None,
-            video_dir=None, video_filter_only: bool = False) -> Path:
+            video_dir=None, video_filter_only: bool = False,
+            buffer_dir=None) -> Path:
     """Collect episodes with the run.py-style controller stack
     (TickChunkedController) via RolloutController mode='collect'. Per-tick
     encoder tokens + body features + h are written to the buffer; dtheta is
@@ -266,7 +267,10 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
     kins = {}  # per-embodiment kinematics, built on first use
 
     if buf is None:
-        buf_dir = out_root / "buffer"
+        # buffer_dir override: the memmap is the training hot path (~80 MB
+        # random reads per grad step) — keep it on LOCAL disk, not a
+        # network FS (/autodl-fs quotas and ~100 MB/s reads stall training)
+        buf_dir = Path(buffer_dir).resolve() if buffer_dir else out_root / "buffer"
         if (buf_dir / "header.json").exists():
             # async online: the warmup collector already created it — never
             # rewrite the header (it would reset n for the reading trainer)
@@ -497,6 +501,10 @@ def main() -> None:
                         "changes (the trainer saves it every "
                         "checkpoint_every steps)")
     p.add_argument("--out", type=Path, default=CEHJ_ROOT / "data" / "smoke")
+    p.add_argument("--buffer-dir", type=Path, default=None,
+                   help="memmap location (default <out>/buffer); use "
+                        "local disk, not network FS — sampling is the "
+                        "training hot path")
     args = p.parse_args()
     cfg = FrozenConfig(task=args.task, embodiment=args.embodiment,
                        n_episodes=args.episodes)
@@ -504,7 +512,7 @@ def main() -> None:
     collect(cfg, args.out, watch=args.watch, follow=args.follow,
             capacity=args.capacity or None, success_only=args.success_only,
             max_slot_retries=args.max_slot_retries,
-            record_video=args.record_video)
+            record_video=args.record_video, buffer_dir=args.buffer_dir)
 
 
 if __name__ == "__main__":
