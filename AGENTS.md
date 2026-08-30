@@ -1,0 +1,141 @@
+# CEHJ_safe — HJ-SAC safety filter on RoboTwin
+
+Cross-embodiment HJ reachability safety filter: a frozen HoloBrain-0 GD encoder
+(vision + robot-state) feeds a geometric trunk; a token actor and twin critics
+learn V(s) ≈ min future clearance h, and a least-restrictive filter overrides
+the nominal planner when Q(s, a_nom) < 0.
+
+## Environment
+
+- conda env `RoboTwin` (sapien 3.0.0b1, RTX ray tracing). RoboTwin lives at
+  `../RoboTwin` relative to the repo root and is on the python path.
+- HoloBrain checkpoint: `HOLOBRAIN_CKPT` env var, default
+  `/root/autodl-tmp/HoloBrain/HoloBrain_v0.0_GD` (see `main/train/collect.py:CKPT_DIR`).
+- wandb project `cehj-hjsac`; online only when `WANDB_API_KEY` is set
+  (train.py:41). Set `WANDB__SERVICE_WAIT=300` on slow networks.
+- No tmux on autodl hosts — use `screen` (`screen -dmS name ...`, `screen -r`).
+
+## Core semantics (do not change casually — they define the MDP)
+
+- Physics 250 Hz, control 25 Hz, one control tick = exactly 10 physics steps.
+- Actor action = per-tick joint displacement δθ, bounded by
+  `dtheta_max = URDF velocity limit × dt × kappa`, **kappa = 1.0** (config.py) —
+  a saturated actor tick and a full-speed cuRobo tick share the same box.
+  The actor never drives grippers (prismatic columns stay zero).
+- **h = min signed distance (robot ∪ held payload) → spawned obstacle**, metres.
+  The table is NOT in h (cuRobo keeps it in its world model). No obstacle →
+  h = +inf → spawn retries are mandatory (see below).
+- **h_scale = 20**: h/V stored and trained in h×20 units; anything human-facing
+  (panel, figures, eval metrics) converts back to cm via ×(100/h_scale).
+- **Filter trigger**: engage when `Q(s, a_nom) < 0` (filter_margin = 0, scaled
+  by h_scale at use), 3-tick intervention blocks (`hj_hold_ticks`), actor
+  re-queried every tick, release tested at each block boundary. No hysteresis.
+- a_nom = pos[min(i_end, T-1)] − qpos_live, per arm, from the live joint state
+  (never the plan's own start) — rollout.py `_anom`.
+- Buffer actions are the COMMANDED displacement per tick, tagged
+  action_source (0 planner / 1 actor / 2 perturbation).
+
+## Layout
+
+- `main/envs/` — `env.py` (Env wrapper, `get_encoder_obs` HoloBrain-parity
+  bundle, `step_dtheta` velocity-feedforward stepping), `controller.py`
+  (TickChunkedController: per-tick hook, deferred replan after interventions),
+  `obstacle.py` (spawn: on/off-path, keepaways, tiered fallback, corridor
+  t∈U[0.22,0.48], model `068_boxdrink`), `distance.py` (sphere/OBB distances,
+  held-object detection latch, `obstacle_contact(env) -> (force_N, touched)`),
+  `record.py`, `run.py` (standalone sweep runner — the reference pipeline).
+- `main/network/` — `encoder.py` (HoloBrainEncoder: frozen backbone/neck/
+  spatial_enhancer + robot-state encoder), `body_features.py`
+  (BodyTokenExtractor: per-link tokens, Jacobians, dtheta_max), `heads.py`
+  (PolicyEncoder/TokenActor/TwinCritic — softmin temperature is `softmin_T ×
+  h_scale`, NOT in the state_dict), `trunk.py`.
+- `main/train/` — see below.
+
+## Training pipeline
+
+Warmup (standalone, reusable, once per dataset — collect ALL embodiments,
+success-only, nominal-only):
+
+```
+python main/train/collect.py --episodes 250 --success-only --record-video \
+    --capacity 250000 --out <warmup_dir>          # buffer in <warmup_dir>/buffer
+```
+
+Round-based training (train → collect with current weights → train):
+
+```
+python main/train/train.py --collect-rounds 10 --episodes-per-round 3 \
+    --grad-steps-per-round 1024 --eval-every 1024 \
+    --init-from <prev checkpoint.pt> --init-buffer <warmup_dir>/buffer \
+    --buffer-dir <LOCAL disk path> --data <data_dir> --run <run_dir>
+```
+
+- Round 0 trains on the warmup buffer first; each later round collects with
+  80% filter / 20% nominal-only episodes (`filter_episode_frac`).
+- LOO: `--leave-out X` (phase 1) / `--only-embodiment X --init-from ...`
+  (phase 2). ONE shared warmup buffer; the trainer filters samples by
+  embodiment_id at sampling time (buffer.set_embodiment_filter).
+- `main/train/run_online.py` — async alternative (separate watch collector
+  process + trainer, checkpoint-follow). Faster wall-clock (collection hides
+  behind training) but round mode is the debuggable default.
+
+## Buffer (`main/train/buffer.py`)
+
+- Flat per-step memmap, ~630 KB/step (dominated by fp16 scene tokens).
+- **Ring semantics**: at capacity, oldest transitions are overwritten
+  (warmup ages out first). `head` persists in header.json; sampling excludes
+  pairs crossing the write head / wrap seam. `discard_to` (success-only
+  rollback) works only pre-wrap.
+- Keep the memmap on LOCAL disk (`--buffer-dir`): ~80 MB random reads per grad
+  step stall badly on network FS (autodl-fs is also quota-limited beyond what
+  `df` shows). Buffer capacity is fixed at creation — size generously.
+
+## Metrics (wandb + `eval/<metric>/roundXXX.png` heatmaps + `trend.png`)
+
+- `violation_rate`: h < 0 (analytic model). `violation_contact`: real surface
+  touch (PhysX separation ≤ 0, obstacle vs anything non-table).
+  `violation_force`: contact force ≥ 20 N (contact_force_threshold; measured
+  real contacts are ≥ 79 N). `violation_any`: h<0 OR force violation.
+- `v_le_h_frac`: fraction of ticks with V ≤ h — HJ consistency; must → 1.0.
+- `q/precision`, `q/recall`: predicted-unsafe (Q < margin) vs actual h<0 next.
+- `actor/action_std`, `actor/sat_frac`, `data/action_std`, `entropy`:
+  mode-collapse diagnostics.
+- `mean_realized_ratio` / `realized_cmd_ratio`: ‖achieved Δq‖/‖commanded δθ‖.
+- `min_h`, `mean_gap` (h−V), per-combo heatmaps are filter-episodes only.
+- eval sweeps are OFF by default (`eval_sweep_every_epochs=0`) — metrics come
+  from the collection episodes themselves via RoundMetrics.
+
+## Videos
+
+- Panel video per episode attempt (warmup: all; rounds: filter episodes only).
+  Observer frame + bbox overlay (obstacle/held) + fixed-height panel:
+  h/Q on one line (cm), control+|a| on one line, intervention counter, block
+  counter (always present), force line (red + TOUCH on contact), h/V/F
+  mini-plot (F normalized — checks alignment with h dips).
+- wandb logging: one `round_videos` carousel per round (list under one key),
+  filtered by file MTIME — filenames collide across restarts, never use
+  name-based dedup.
+
+## Gotchas (learned the hard way)
+
+- Ray tracing: call `task._update_render()` before any `take_picture` or the
+  RT scene is stale. OIDN "invalid handle" errors are harmless spam (~10
+  ms/tick). `RenderCameraGroup` renders WRONG poses for mounted cameras on
+  CPU sim — do not use it.
+- RT Color pictures are HDR float; alpha is NOT 0/1 — depth mask is
+  clamp(alpha,0,1) × (Position.w < 1), see env.py get_encoder_obs.
+- Tick accumulator: 10 × float(0.1) < 1.0 — rollout.py uses a 1e-9 epsilon,
+  keep it.
+- PhysX contact points are speculative (1–2 cm, zero impulse) — real touches
+  are separation ≤ 0.
+- wandb calls must stay wrapped in _safe_wandb_log (CommError killed a run).
+- Checkpoints publish atomically (tmp + os.replace); the --follow collector
+  tolerates load failures.
+- git push: ghfast.top is read-only; push direct to github.com with the token.
+- Never commit `data/` (memmaps) or `wandb/` — gitignored.
+
+## Quick checks
+
+- `python main/train/buffer.py`-level unit snippets for ring/sampling live in
+  git history; `bench_warmup_cost.py` profiles a collection episode;
+  `profile_sim.py` / `bench_step_cost.py` profile the vanilla pipeline.
