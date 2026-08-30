@@ -848,9 +848,17 @@ def _robot_obstacle_contact(env) -> bool:
 
 
 def _robot_obstacle_contact_force(env) -> float:
-    """Max contact force (N) between any robot link and the obstacle this
-    physics step;  0.0 when untouched. impulse/dt per contact point."""
+    """Max contact force (N) between the obstacle and (any robot link OR the
+    held payload) this physics step; 0.0 when untouched. impulse/dt per
+    contact point. Held payload counts: a grasped object hitting the
+    obstacle is a collision (it is part of the body set in h as well)."""
     robot_names = _robot_link_names(env.robot)
+    held_ids: set[int] = set()
+    latch = getattr(env, "_cehj_held_latch", None)
+    if isinstance(latch, dict):
+        for hit in latch.values():
+            if hit and hit.get("actor") is not None:
+                held_ids |= _entity_ids(hit["actor"])
     max_f = 0.0
     try:
         contacts = env.task.scene.get_contacts()
@@ -859,15 +867,21 @@ def _robot_obstacle_contact_force(env) -> float:
 
     dt = float(getattr(env.task.scene, "timestep", 1.0 / 250.0))
     for contact in contacts:
-        names = [contact.bodies[0].entity.name, contact.bodies[1].entity.name]
+        ents = [contact.bodies[0].entity, contact.bodies[1].entity]
+        names = [getattr(e, "name", "") or "" for e in ents]
         if OBSTACLE_NAME not in names:
             continue
         other = names[0] if names[1] == OBSTACLE_NAME else names[1]
+        other_ent = ents[0] if names[1] == OBSTACLE_NAME else ents[1]
         if other == OBSTACLE_NAME:
             continue
-        if other in robot_names or any(
-            tag in other.lower()
-            for tag in ("piper", "panda", "franka", "ur5", "arx", "gripper", "finger")
+        if (
+            other in robot_names
+            or any(
+                tag in other.lower()
+                for tag in ("piper", "panda", "franka", "ur5", "arx", "gripper", "finger")
+            )
+            or (held_ids and id(other_ent) in held_ids)
         ):
             for p in contact.points:
                 f = float(np.linalg.norm(p.impulse)) / dt
