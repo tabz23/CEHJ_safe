@@ -554,6 +554,12 @@ def main() -> None:
                     encoder=trainer._eval_encoder, models=None,
                     round_index=0)
         vid_dir = args.run / "eval" / "videos"
+        # cross-embodiment eval: every 10 epochs, 3 filtered episodes on the
+        # embodiment(s) excluded from training (LOO), tasks rotating
+        left_embs = [e for e in EMBODIMENT_IDS if e not in cfg.embodiment_choices]
+        cross_every = 10 * args.eval_every
+        cross_sweep = 0
+        last_cross_step = 0
         for r in range(args.collect_rounds):
             trainer.train_steps(args.grad_steps_per_round, run)
             trainer.save_checkpoint(args.run / "checkpoint.pt")
@@ -589,6 +595,16 @@ def main() -> None:
                 if vids:
                     _safe_wandb_log(run, {"round_videos": vids},
                                     trainer.step)
+            if left_embs and trainer.step - last_cross_step >= cross_every:
+                from main.train.eval_utils import run_cross_eval
+
+                run_cross_eval(cfg, cross_sweep, left_embs,
+                               trainer._eval_encoder, trainer.policy_enc,
+                               trainer.actor, trainer.critics,
+                               args.run / "eval" / "cross_embodiment",
+                               wandb_run=run, step=trainer.step)
+                cross_sweep += 1
+                last_cross_step = trainer.step
         # final render (all rounds accumulated) instead of the removed sweep
         rmet.render(args.run / "eval", tag="final",
                     tasks=list(cfg.task_choices),

@@ -191,6 +191,84 @@ def save_eval_figure(trace, out_dir: Path, mode: str, step: int) -> Path:
     return path
 
 
+def run_cross_eval(cfg, sweep: int, left_embs, encoder, policy_enc, actor,
+                   critics, out_dir: Path, wandb_run=None, step: int = 0):
+    """Cross-embodiment eval: 3 filtered episodes on the embodiment(s) NOT in
+    the training pool, tasks rotating through cfg.task_choices across sweeps.
+    Videos + RoundMetrics under <out_dir>/ (= run/eval/cross_embodiment)."""
+    import dataclasses
+
+    from main.train.collect import CKPT_DIR, make_kinematics
+    from main.train.rollout import RolloutController
+    from main.train.round_metrics import RoundMetrics
+
+    out_dir = Path(out_dir)
+    vid_dir = out_dir / "videos"
+    vid_dir.mkdir(parents=True, exist_ok=True)
+    rmet = RoundMetrics(out_dir / "cross_metrics.jsonl")
+    tasks = list(cfg.task_choices)
+    n_eps = 3
+    for k in range(n_eps):
+        task = tasks[(sweep * n_eps + k) % len(tasks)]
+        emb = left_embs[(sweep * n_eps + k) % len(left_embs)]
+        cfg_ep = dataclasses.replace(cfg, task=task, embodiment=emb)
+        seed = int(cfg_ep.eval_seeds[0]) + sweep
+        if cfg_ep.randomize_scenes:
+            rng = np.random.RandomState(seed)
+            mode = "off_path" if rng.rand() < cfg_ep.off_path_frac else "on_path"
+            cfg_ep = dataclasses.replace(cfg_ep, obstacle_mode=mode)
+        kin = make_kinematics(CKPT_DIR, emb)
+        video = PanelVideoWriter(
+            vid_dir / f"cross_s{sweep:02d}_{emb}_{task}.mp4",
+            fps=25.0, h_scale=float(cfg_ep.h_scale),
+        )
+        ro = None
+        for retry in range(5):
+            candidate = RolloutController(
+                cfg_ep, seed + retry * 1000, mode="filtered", encoder=encoder,
+                kin=kin, policy_enc=policy_enc, actor=actor, critics=critics,
+                video=video if retry == 0 else None,
+                max_steps=int(cfg_ep.max_steps_per_episode * 250.0 / 25.0),
+            )
+            if candidate.env.obstacle is not None:
+                ro = candidate
+                break
+            candidate.env.close()
+        if ro is None:
+            video.close()
+            print(f"[cross] spawn failed 5x for {emb}/{task}; skipping")
+            continue
+        trace = ro.run()
+        video.close()
+        rmet.record(sweep, task, emb,
+                    compute_trace_metrics(trace, float(cfg_ep.h_scale)))
+        print(f"[cross] sweep {sweep}: {emb}/{task} "
+              f"success={trace['success']} min_h={min(trace['h']):.2f}")
+    overall = rmet.render(out_dir, tag=f"sweep{sweep:03d}", tasks=tasks,
+                          embodiments=list(left_embs))
+    if wandb_run is not None:
+        import wandb
+
+        from main.train.train import _safe_wandb_log
+
+        logs = {f"cross_overview/{k}": v for k, v in overall.items()}
+        imgs = {}
+        for metric in ("task_success", "violation_rate", "violation_contact",
+                       "violation_force", "violation_any", "intervention_rate"):
+            p = out_dir / metric / f"sweep{sweep:03d}.png"
+            if p.exists():
+                imgs[f"cross_heatmap/{metric}"] = wandb.Image(str(p))
+        vids = sorted(vid_dir.glob(f"cross_s{sweep:02d}_*.mp4"))
+        if vids:
+            logs["cross_videos"] = [
+                wandb.Video(str(v), format="mp4", caption=v.stem)
+                for v in vids
+            ]
+        logs.update(imgs)
+        _safe_wandb_log(wandb_run, logs, step)
+    return overall
+
+
 class PanelVideoWriter:
     """Observer frame + 320px white PIL panel -> 960x480 mp4."""
 
