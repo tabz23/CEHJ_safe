@@ -559,11 +559,10 @@ def main() -> None:
             trainer.save_checkpoint(args.run / "checkpoint.pt")
             models = (trainer.policy_enc, trainer.actor, trainer.critics)
             cfg_r = dataclasses.replace(cfg, n_episodes=n_ep)
-            # only this round's videos: the dir persists across restarts,
-            # so snapshot before collecting (a process-lifetime "logged"
-            # set re-logs stale files after any restart)
-            vids_before = (set(vid_dir.glob("*.mp4")) if vid_dir.exists()
-                           else set())
+            # only this round's videos: file NAMES collide across restarts
+            # (ep0000_a000_...), so snapshot mtimes — a rewritten-in-place
+            # file still counts as new
+            t_round = time.time()
             collect(cfg_r, args.data, buf=trainer.buf,
                     episode_offset=id_base + r * n_ep,
                     encoder=trainer._eval_encoder, models=models,
@@ -585,8 +584,8 @@ def main() -> None:
                 # wandb renders it as a carousel with a slider (plus the
                 # step slider across rounds), not one cell per episode
                 vids = [wandb.Video(str(v), format="mp4", caption=v.stem)
-                        for v in sorted(set(vid_dir.glob("*.mp4"))
-                                        - vids_before)]
+                        for v in sorted(vid_dir.glob("*.mp4"))
+                        if v.stat().st_mtime >= t_round - 1]
                 if vids:
                     _safe_wandb_log(run, {"round_videos": vids},
                                     trainer.step)
