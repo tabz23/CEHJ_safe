@@ -844,6 +844,12 @@ def _held_obstacle_contact(env, held_actor) -> bool:
     return False
 
 
+def obstacle_contact(env) -> tuple[float, bool]:
+    """Public: (max force N, touched) — force received BY the obstacle from
+    any non-table contact this physics step. Separate from distance/h."""
+    return _robot_obstacle_contact_force(env)
+
+
 def _robot_obstacle_contact(env) -> bool:
     f, touched = _robot_obstacle_contact_force(env)
     return f > 0.0 or touched

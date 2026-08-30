@@ -33,6 +33,7 @@ import torch
 from main.network.body_features import BodyTokenExtractor  # noqa: E402
 from main.train.collect import make_training_env  # noqa: E402
 from main.train.hfunc import compute_h  # noqa: E402
+from main.envs.distance import obstacle_contact  # noqa: E402
 
 
 class RolloutTimeout(Exception):
@@ -100,6 +101,7 @@ class RolloutController:
         self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": [],
                       "contact_force": [], "contact_touch": []}
         self._tick_acc = 0.0
+        self._last_force_touch = (0.0, False)
         self._orig_step = None
         self._last_ratio = 0.0
         self._block_info = None      # (tick-in-block, hold_ticks, engaged_s)
@@ -212,8 +214,10 @@ class RolloutController:
         t_now = self._n_physics / self.env.PHYSICS_FREQ
         self.trace["t"].append(t_now)
         self.trace["h"].append(float(h))
-        self.trace["contact_force"].append(float(diag.get("contact_force", 0.0)))
-        self.trace["contact_touch"].append(bool(diag.get("contact_touch", False)))
+        force, touch = obstacle_contact(self.env)
+        self.trace["contact_force"].append(float(force))
+        self.trace["contact_touch"].append(bool(touch))
+        self._last_force_touch = (force, touch)
         # encode ONCE per tick: the buffer write, the hook's Q(s, a_nom) eval
         # (same sim state — the hook fires at this exact boundary), and the
         # actor all consume this encoding
@@ -258,8 +262,8 @@ class RolloutController:
                 "holding_right": diag.get("holding_right", ""),
                 "hold_debug": diag.get("hold_debug", {}),
                 "contact": diag.get("contact", False),
-                "contact_force": diag.get("contact_force", 0.0),
-                "contact_touch": diag.get("contact_touch", False),
+                "contact_force": self._last_force_touch[0],
+                "contact_touch": self._last_force_touch[1],
                 "block": self._block_info,
                 # cumulative actor intervention so far: (ticks, seconds)
                 "intervened": (self._engaged_ticks,

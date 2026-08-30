@@ -134,8 +134,6 @@ def compute_h(env, table_margin: float = 0.01, table_height: float = TABLE_HEIGH
         "holding_right": info.get("holding_right", ""),
         "hold_debug": info.get("hold_debug", {}),
         "contact": info.get("contact", False),
-        "contact_force": info.get("contact_force", 0.0),
-        "contact_touch": info.get("contact_touch", False),
         "n_below_table": n_below,
     }
     return h, diag
