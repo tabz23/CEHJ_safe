@@ -554,12 +554,16 @@ def main() -> None:
                     encoder=trainer._eval_encoder, models=None,
                     round_index=0)
         vid_dir = args.run / "eval" / "videos"
-        logged_vids: set[str] = set()
         for r in range(args.collect_rounds):
             trainer.train_steps(args.grad_steps_per_round, run)
             trainer.save_checkpoint(args.run / "checkpoint.pt")
             models = (trainer.policy_enc, trainer.actor, trainer.critics)
             cfg_r = dataclasses.replace(cfg, n_episodes=n_ep)
+            # only this round's videos: the dir persists across restarts,
+            # so snapshot before collecting (a process-lifetime "logged"
+            # set re-logs stale files after any restart)
+            vids_before = (set(vid_dir.glob("*.mp4")) if vid_dir.exists()
+                           else set())
             collect(cfg_r, args.data, buf=trainer.buf,
                     episode_offset=id_base + r * n_ep,
                     encoder=trainer._eval_encoder, models=models,
@@ -580,12 +584,9 @@ def main() -> None:
                 # one panel per round: a LIST of videos under a single key —
                 # wandb renders it as a carousel with a slider (plus the
                 # step slider across rounds), not one cell per episode
-                vids = []
-                for v in sorted(vid_dir.glob("*.mp4")):
-                    if v.name not in logged_vids:
-                        logged_vids.add(v.name)
-                        vids.append(wandb.Video(str(v), format="mp4",
-                                                caption=v.stem))
+                vids = [wandb.Video(str(v), format="mp4", caption=v.stem)
+                        for v in sorted(set(vid_dir.glob("*.mp4"))
+                                        - vids_before)]
                 if vids:
                     _safe_wandb_log(run, {"round_videos": vids},
                                     trainer.step)
