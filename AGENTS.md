@@ -72,11 +72,45 @@ python main/train/train.py --collect-rounds 10 --episodes-per-round 3 \
 
 - Round 0 trains on the warmup buffer first; each later round collects with
   80% filter / 20% nominal-only episodes (`filter_episode_frac`).
-- LOO: `--leave-out X` (phase 1) / `--only-embodiment X --init-from ...`
-  (phase 2). ONE shared warmup buffer; the trainer filters samples by
-  embodiment_id at sampling time (buffer.set_embodiment_filter).
 - `main/train/run_online.py` — async alternative (separate watch collector
   process + trainer, checkpoint-follow). Faster wall-clock (collection hides
+  behind training); round mode is the debuggable default.
+
+## Cross-validation (LOO and leave-4-out)
+
+ONE shared warmup buffer for everything — collect the full 5x5 pool once,
+never per split (the trainer filters samples by embodiment_id at sampling
+time; see buffer.set_embodiment_filter):
+
+```
+python main/train/collect.py --episodes 250 --success-only --record-video \
+    --capacity 250000 --out <warmup_dir>
+```
+
+Leave-one-out (train on 4, finetune the 5th):
+
+```
+# phase 1: exclude piper; cross-eval on piper runs every 10 epochs
+python main/train/train.py --collect-rounds N ... --leave-out piper \
+    --init-buffer <warmup_dir>/buffer --buffer-dir <local> --run <run_p1>
+
+# phase 2: finetune the phase-1 checkpoint on piper only
+python main/train/train.py --collect-rounds M ... --only-embodiment piper \
+    --init-from <run_p1>/checkpoint.pt --init-buffer <warmup_dir>/buffer ...
+```
+
+Leave-4-out (train on 1, eval the other 4): just drop --init-from —
+
+```
+python main/train/train.py --collect-rounds N ... --only-embodiment piper \
+    --init-buffer <warmup_dir>/buffer --buffer-dir <local> --run <run_l4o>
+```
+
+The cross-embodiment sweep fires every 10 epochs on ALL embodiments outside
+the training pool (1 for LOO, 4 for L4O): 3 filtered episodes per sweep,
+tasks rotating through the 5, under <run>/eval/cross_embodiment/ and wandb
+cross_overview/ + cross_heatmap/ + cross_videos.
+
   behind training) but round mode is the debuggable default.
 
 ## Buffer (`main/train/buffer.py`)
