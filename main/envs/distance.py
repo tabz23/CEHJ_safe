@@ -202,8 +202,8 @@ def distance_info(env) -> dict:
     d_min = _finite_min([d_left, d_right, d_left_held, d_right_held])
     # max robot<->obstacle contact force this physics step (N;  0 = no touch).
     # `contact` keeps the old boolean semantics (direct OR via held object)
-    contact_force = _robot_obstacle_contact_force(env)
-    contact = contact_force > 0.0
+    contact_force, contact_touch = _robot_obstacle_contact_force(env)
+    contact = contact_force > 0.0 or contact_touch
     if not contact and left_actor is not None:
         contact = _held_obstacle_contact(env, left_actor)
     if not contact and right_actor is not None:
@@ -221,6 +221,7 @@ def distance_info(env) -> dict:
             "d_system": d_min,
             "contact": contact,
             "contact_force": contact_force,
+            "contact_touch": contact_touch,
             "closest": closest,
             "holding": holding,
             "holding_left": left_label,
@@ -844,19 +845,22 @@ def _held_obstacle_contact(env, held_actor) -> bool:
 
 
 def _robot_obstacle_contact(env) -> bool:
-    return _robot_obstacle_contact_force(env) > 0.0
+    f, touched = _robot_obstacle_contact_force(env)
+    return f > 0.0 or touched
 
 
-def _robot_obstacle_contact_force(env) -> float:
-    """Max contact force (N) received BY the obstacle from anything except
-    the table this physics step; 0.0 when untouched. impulse/dt per contact
-    point. Robot links, held payloads, task objects — any non-table contact
-    means the obstacle was touched, which is what we count."""
+def _robot_obstacle_contact_force(env) -> tuple[float, bool]:
+    """(max force N, touched) for obstacle contacts with anything except the
+    table, this physics step. touched = any contact point with
+    separation <= 0 — PhysX reports SPECULATIVE contacts at 1-2 cm with zero
+    impulse, so real touches need the separation check, and hard pushes show
+    up as impulse spikes (measured >= 79 N)."""
     max_f = 0.0
+    touched = False
     try:
         contacts = env.task.scene.get_contacts()
     except Exception:
-        return 0.0
+        return 0.0, False
 
     dt = float(getattr(env.task.scene, "timestep", 1.0 / 250.0))
     for contact in contacts:
@@ -868,10 +872,12 @@ def _robot_obstacle_contact_force(env) -> float:
         if other == OBSTACLE_NAME or "table" in other.lower():
             continue  # the obstacle rests on the table — ignore that contact
         for p in contact.points:
+            if float(p.separation) <= 0.0:
+                touched = True
             f = float(np.linalg.norm(p.impulse)) / dt
             if f > max_f:
                 max_f = f
-    return max_f
+    return max_f, touched
 
 
 def obstacle_corners(actor, half=None) -> np.ndarray:

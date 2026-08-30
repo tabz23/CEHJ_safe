@@ -98,7 +98,7 @@ class RolloutController:
                 hold_ticks=int(getattr(cfg, "hj_hold_ticks", 3)),
             )
         self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": [],
-                      "contact_force": []}
+                      "contact_force": [], "contact_touch": []}
         self._tick_acc = 0.0
         self._orig_step = None
         self._last_ratio = 0.0
@@ -213,6 +213,7 @@ class RolloutController:
         self.trace["t"].append(t_now)
         self.trace["h"].append(float(h))
         self.trace["contact_force"].append(float(diag.get("contact_force", 0.0)))
+        self.trace["contact_touch"].append(bool(diag.get("contact_touch", False)))
         # encode ONCE per tick: the buffer write, the hook's Q(s, a_nom) eval
         # (same sim state — the hook fires at this exact boundary), and the
         # actor all consume this encoding
@@ -258,6 +259,7 @@ class RolloutController:
                 "hold_debug": diag.get("hold_debug", {}),
                 "contact": diag.get("contact", False),
                 "contact_force": diag.get("contact_force", 0.0),
+                "contact_touch": diag.get("contact_touch", False),
                 "block": self._block_info,
                 # cumulative actor intervention so far: (ticks, seconds)
                 "intervened": (self._engaged_ticks,

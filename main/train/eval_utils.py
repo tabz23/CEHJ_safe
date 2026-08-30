@@ -47,6 +47,9 @@ def compute_trace_metrics(trace: dict, h_scale: float,
     return {
         "violation_rate": float((h_arr < 0).mean()) if len(h_arr) else float("nan"),
         "violation_force": violation_force,
+        "violation_contact": float(np.array(
+            trace.get("contact_touch", [False] * len(h_arr))).mean())
+        if len(h_arr) else float("nan"),
         "violation_any": violation_any,
         "contact_force_max": float(force.max()) if len(force) else float("nan"),
         "contact_force_mean_nz": (
@@ -277,8 +280,11 @@ class PanelVideoWriter:
             # contact force to the obstacle (N); red above the collision
             # threshold (20 N — real contacts in sim are >= 79 N)
             force = extras.get("contact_force", 0.0) or 0.0
-            f_color = (200, 60, 40) if force >= 20.0 else (60, 60, 60)
-            d.text((12, y), f"force = {force:5.1f} N", fill=f_color)
+            touch = bool(extras.get("contact_touch", False))
+            hit = touch or force >= 20.0
+            f_color = (200, 60, 40) if hit else (60, 60, 60)
+            tag = " TOUCH" if touch else ""
+            d.text((12, y), f"force = {force:5.1f} N{tag}", fill=f_color)
             y += 18
             # HOLD line with provenance, same format as record.py's recorder
             dbg = extras.get("hold_debug") or {}
