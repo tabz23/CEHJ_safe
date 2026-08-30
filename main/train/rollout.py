@@ -97,7 +97,8 @@ class RolloutController:
                 margin=float(getattr(cfg, "filter_margin", 0.0)) * hs,
                 hold_ticks=int(getattr(cfg, "hj_hold_ticks", 3)),
             )
-        self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": []}
+        self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": [],
+                      "contact_force": []}
         self._tick_acc = 0.0
         self._orig_step = None
         self._last_ratio = 0.0
@@ -211,6 +212,7 @@ class RolloutController:
         t_now = self._n_physics / self.env.PHYSICS_FREQ
         self.trace["t"].append(t_now)
         self.trace["h"].append(float(h))
+        self.trace["contact_force"].append(float(diag.get("contact_force", 0.0)))
         # encode ONCE per tick: the buffer write, the hook's Q(s, a_nom) eval
         # (same sim state — the hook fires at this exact boundary), and the
         # actor all consume this encoding

@@ -21,7 +21,8 @@ from pathlib import Path
 import numpy as np
 
 METRICS = (
-    "task_success", "violation_rate", "intervention_rate", "mode_switches",
+    "task_success", "violation_rate", "violation_force", "violation_any",
+    "intervention_rate", "mode_switches",
     "min_h", "mean_gap", "v_le_h_frac", "realized_cmd_ratio",
 )
 

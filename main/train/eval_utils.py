@@ -22,7 +22,8 @@ import sys
 CEHJ_ROOT = Path(__file__).resolve().parents[2]
 
 
-def compute_trace_metrics(trace: dict, h_scale: float) -> dict:
+def compute_trace_metrics(trace: dict, h_scale: float,
+                          contact_force_threshold: float = 20.0) -> dict:
     """Per-episode metrics from a RolloutController trace (collection or
     eval). h/V are stored in h_scale (training) units; distances are
     reported in cm."""
@@ -36,8 +37,17 @@ def compute_trace_metrics(trace: dict, h_scale: float) -> dict:
         mean_gap = float((h_at_v - V_arr).mean()) * cm
     else:
         v_le_h, mean_gap = float("nan"), float("nan")
+    force = np.array(trace.get("contact_force", []))
+    if len(force) and len(force) == len(h_arr):
+        f_viol = force >= contact_force_threshold
+        violation_force = float(f_viol.mean())
+        violation_any = float(((h_arr < 0) | f_viol).mean())
+    else:
+        violation_force = violation_any = float("nan")
     return {
         "violation_rate": float((h_arr < 0).mean()) if len(h_arr) else float("nan"),
+        "violation_force": violation_force,
+        "violation_any": violation_any,
         "intervention_rate": float(trace.get("intervention_rate", 0.0)),
         "mode_switches": int(trace.get("mode_switches", 0)),
         "task_success": bool(trace["success"]),

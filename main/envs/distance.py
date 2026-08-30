@@ -200,7 +200,10 @@ def distance_info(env) -> dict:
     d_robot = _finite_min([d_left, d_right])
     d_held = _finite_min([d_left_held, d_right_held])
     d_min = _finite_min([d_left, d_right, d_left_held, d_right_held])
-    contact = _robot_obstacle_contact(env)
+    # max robot<->obstacle contact force this physics step (N;  0 = no touch).
+    # `contact` keeps the old boolean semantics (direct OR via held object)
+    contact_force = _robot_obstacle_contact_force(env)
+    contact = contact_force > 0.0
     if not contact and left_actor is not None:
         contact = _held_obstacle_contact(env, left_actor)
     if not contact and right_actor is not None:
@@ -217,6 +220,7 @@ def distance_info(env) -> dict:
             "d_held": d_held,
             "d_system": d_min,
             "contact": contact,
+            "contact_force": contact_force,
             "closest": closest,
             "holding": holding,
             "holding_left": left_label,
@@ -840,11 +844,20 @@ def _held_obstacle_contact(env, held_actor) -> bool:
 
 
 def _robot_obstacle_contact(env) -> bool:
+    return _robot_obstacle_contact_force(env) > 0.0
+
+
+def _robot_obstacle_contact_force(env) -> float:
+    """Max contact force (N) between any robot link and the obstacle this
+    physics step;  0.0 when untouched. impulse/dt per contact point."""
     robot_names = _robot_link_names(env.robot)
+    max_f = 0.0
     try:
         contacts = env.task.scene.get_contacts()
     except Exception:
-        return False
+        return 0.0
+
+    dt = float(getattr(env.task.scene, "timestep", 1.0 / 250.0))
     for contact in contacts:
         names = [contact.bodies[0].entity.name, contact.bodies[1].entity.name]
         if OBSTACLE_NAME not in names:
@@ -852,12 +865,15 @@ def _robot_obstacle_contact(env) -> bool:
         other = names[0] if names[1] == OBSTACLE_NAME else names[1]
         if other == OBSTACLE_NAME:
             continue
-        if other in robot_names:
-            return True
-        low = other.lower()
-        if any(tag in low for tag in ("piper", "panda", "franka", "ur5", "arx", "gripper", "finger")):
-            return True
-    return False
+        if other in robot_names or any(
+            tag in other.lower()
+            for tag in ("piper", "panda", "franka", "ur5", "arx", "gripper", "finger")
+        ):
+            for p in contact.points:
+                f = float(np.linalg.norm(p.impulse)) / dt
+                if f > max_f:
+                    max_f = f
+    return max_f
 
 
 def obstacle_corners(actor, half=None) -> np.ndarray:
