@@ -221,46 +221,42 @@ class PanelVideoWriter:
         img = Image.new("RGB", (W, H), "white")
         d = ImageDraw.Draw(img)
         color = (200, 60, 40) if control == "FILTER" else (60, 60, 60)
+        # fixed-height layout: h and Q share a line, control and |a| share
+        # a line, the block line is ALWAYS present (blank when not engaged)
+        # — otherwise the panel jumps vertically whenever the filter engages
+        q_txt = f"Q = {V * cm:+.1f}" if V is not None and np.isfinite(V) else "Q =   -"
         lines = [
             f"t = {t:5.2f} s      step {step}/{n_steps}",
-            f"h        = {h_cm:+.1f} cm",
+            f"h = {h_cm:+.1f}   {q_txt} cm",
         ]
         if V is not None and np.isfinite(V):
-            lines += [
-                f"Q(s,a_nom)= {V * cm:+.1f} cm",
-                f"h - Q    = {(h - V) * cm:+.1f}",
-            ]
+            lines.append(f"h - Q  = {(h - V) * cm:+.1f}")
         else:
-            # warmup / nominal-only: no critic, nothing scored
-            lines += ["Q(s,a_nom)=   -", "h - Q    =   -"]
+            lines.append("h - Q  =   -")
         y = 16
         for line in lines:
             d.text((12, y), line, fill=(0, 0, 0))
             y += 22
-        d.text((12, y), f"control  =  {control}", fill=color)
-        y += 22
-        # ratio: nominal's demanded step vs the actor bound on NOMINAL
-        # ticks, the actor's own action on FILTER ticks
-        d.text((12, y), f"|a| =  {ratio:.2f} x max", fill=(0, 0, 0))
+        d.text((12, y), f"{control}   |a| = {ratio:.2f} x max", fill=color)
         y += 22
         # cumulative intervention count (0 ticks on pure-nominal episodes)
-        if extras:
-            iv = extras.get("intervened")
-            if iv is not None:
-                d.text(
-                    (12, y),
-                    f"intervened: {iv[0]} ticks ({iv[1]:.2f} s)",
-                    fill=(200, 60, 40) if iv[0] else (60, 60, 60),
-                )
-                y += 22
+        iv = extras.get("intervened") if extras else None
+        if iv is None:
+            iv = (0, 0.0)
+        d.text(
+            (12, y),
+            f"intervened: {iv[0]} ticks ({iv[1]:.2f} s)",
+            fill=(200, 60, 40) if iv[0] else (60, 60, 60),
+        )
+        y += 22
         block = extras.get("block") if extras else None
-        if block is not None:
-            d.text(
-                (12, y),
-                f"block {block[0]}/{block[1]}   engaged {block[2]:.2f} s",
-                fill=(200, 60, 40),
-            )
-            y += 22
+        d.text(
+            (12, y),
+            (f"block {block[0]}/{block[1]}   engaged {block[2]:.2f} s"
+             if block is not None else ""),
+            fill=(200, 60, 40),
+        )
+        y += 22
         if extras:
             d.text(
                 (12, y),
