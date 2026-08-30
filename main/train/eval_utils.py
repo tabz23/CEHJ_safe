@@ -51,6 +51,7 @@ def compute_trace_metrics(trace: dict, h_scale: float,
             trace.get("contact_touch", [False] * len(h_arr))).mean())
         if len(h_arr) else float("nan"),
         "violation_any": violation_any,
+        "contact_ticks": float((force > 0).sum()) if len(force) else float("nan"),
         "contact_force_max": float(force.max()) if len(force) else float("nan"),
         "contact_force_mean_nz": (
             float(force[force > 0].mean())
