@@ -28,3 +28,4 @@ data/wandb/
 
 # Training data (memmap buffers)
 data/
+.kimi-code/
