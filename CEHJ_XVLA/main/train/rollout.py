@@ -78,8 +78,9 @@ EMBODIMENT_IDS = {"piper": 0, "franka-panda": 1, "ARX-X5": 2,
 # action_source values stored in the buffer
 SRC_PLANNER, SRC_ACTOR, SRC_PERTURB = 0, 1, 2
 
-EE6D_ARM_DIM = 10  # dxyz(3) + drot6d(6) + dgripper(1)
-N_ACTION = 20      # two arms
+EE6D_ARM_DIM = 9   # dxyz(3) + drot6d(6) — the filter never
+                      # drives the gripper (task script owns it)
+N_ACTION = 18      # two arms, no gripper channels
 
 
 # ---------------- rotation helpers (true rotations, wxyz quats) ----------------
@@ -341,8 +342,9 @@ class RolloutController:
 
     # ---------------- proprio / a_nom ----------------
     def _proprio(self, obs) -> np.ndarray:
-        """X-VLA EE6D proprio [20]: per arm [xyz, rot6d(wxyz quat), 1-2*g]."""
-        out = np.zeros(N_ACTION, dtype=np.float64)
+        """X-VLA EE6D proprio [20]: per arm [xyz, rot6d(wxyz quat), 1-2*g].
+        (input encoding — includes the gripper; the ACTION does not)"""
+        out = np.zeros(20, dtype=np.float64)  # X-VLA proprio layout
         for arm_i in range(2):
             ee = obs["ee_poses"][arm_i]
             out[arm_i * 10: arm_i * 10 + 3] = ee[:3]
@@ -355,8 +357,8 @@ class RolloutController:
     def _anom(self, ctx) -> np.ndarray:
         """Nominal's commanded EE6D delta for the upcoming tick, per arm:
         from the LIVE measured EE pose to the plan-row EE target
-        (FK of pos[min(i_end, T-1)]). Gripper delta from the plan's gripper
-        rows at the same cursor, in the 1-2g channel."""
+        (FK of pos[min(i_end, T-1)]). No gripper channel — the filter never
+        drives it."""
         from main.envs.controller import _path_arrays
 
         i, spt = ctx["i"], self.ctrl.steps_per_tick
@@ -374,17 +376,10 @@ class RolloutController:
             else:
                 T_tgt = self._fk_ee_world(q_left, pos[i_end])[1]
             T_cur = _pose_to_mat(obs["ee_poses"][arm_i])
-            a[arm_i * 10: arm_i * 10 + 3] = T_tgt[:3, 3] - T_cur[:3, 3]
-            a[arm_i * 10 + 3: arm_i * 10 + 9] = mat_to_rot6d(
+            a[arm_i * 9: arm_i * 9 + 3] = T_tgt[:3, 3] - T_cur[:3, 3]
+            a[arm_i * 9 + 3: arm_i * 9 + 9] = mat_to_rot6d(
                 T_cur[:3, :3].T @ T_tgt[:3, :3]
             )
-            g = ctx.get("left_g" if arm_i == 0 else "right_g")
-            if g is not None:
-                gi = min(ctx["g_i"] + spt - 1, int(g["num_step"]) - 1)
-                # 1-2g channel: delta = (1-2*g_tgt) - (1-2*g_now)
-                a[arm_i * 10 + 9] = 2.0 * (
-                    obs["grippers"][arm_i] - float(g["result"][gi])
-                )
         return a
 
     # ---------------- EE6D execution ----------------
@@ -400,30 +395,23 @@ class RolloutController:
     def _execute_ee6d(self, action: np.ndarray) -> None:
         """EE6D delta -> per-tick joint displacement -> env.step_dtheta.
 
-        Per arm: Δx = [dxyz, axis-angle(R_delta)] (world frame), Δq = J⁺ Δx
-        with damped least squares (λ = dls_lambda) so near-singular J stays
-        bounded. The gripper delta passes through to a normalized [0,1]
-        target (g_new = g_now − dgrip/2 in the 1-2g channel). step_dtheta
-        runs the same 10-substep velocity-feedforward tick the parent's
-        joint-space actor uses — actor ticks share the planner's tick
-        structure exactly.
-        """
-        state = self._ee_state()
+        Per arm: dx = [dxyz, axis-angle(R_delta)] (world frame), dq = J+ dx
+        with damped least squares (lambda = dls_lambda) so near-singular J
+        stays bounded. No gripper channel — the filter never drives the
+        gripper; it holds its current opening (task script owns timing).
+        step_dtheta runs the same 10-substep velocity-feedforward tick the
+        parent's joint-space actor uses."""
         q_left, q_right = self._arm_qpos()
         dq = np.zeros(self._n_arm[0] + self._n_arm[1], dtype=np.float64)
-        grips = []
         for arm_i, q_arm in enumerate((q_left, q_right)):
-            d = action[arm_i * 10: (arm_i + 1) * 10]
+            d = action[arm_i * 9: (arm_i + 1) * 9]
             dx = np.concatenate([d[:3], mat_to_axis_angle(rot6d_to_mat(d[3:9]))])
             J = self._arm_jacobian(arm_i, q_arm)
             n = self._n_arm[arm_i]
             lam2 = self.dls_lambda ** 2
             dq_arm = J.T @ np.linalg.solve(J @ J.T + lam2 * np.eye(6), dx)
             dq[arm_i * n: (arm_i + 1) * n] = dq_arm
-            # 1-2g channel: g01_new = g01_now - dgrip/2, clipped to [0, 1]
-            grips.append(float(np.clip(state["grippers"][arm_i] - d[9] / 2.0,
-                                       0.0, 1.0)))
-        self.env.step_dtheta(dq, grip_left=grips[0], grip_right=grips[1])
+        self.env.step_dtheta(dq)
 
     # ---------------- per-tick hook ----------------
     def _tick_hook(self, ctx) -> bool:

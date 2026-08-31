@@ -30,12 +30,13 @@ import numpy as np
 
 SCENE_TOKENS = 200
 TOKEN_DIM = 1024  # pre-adapter X-VLA feature width
-N_ACTION = 20  # EE6D x 2 arms
+PROPRIO_DIM = 20  # X-VLA EE6D proprio x 2 arms (input encoding, with gripper)
+N_ACTION = 18     # action: dxyz + drot6d per arm, NO gripper (filter never drives it)
 
 # name -> (dtype, per-step shape)
 FIELDS = {
     "scene_tokens": (np.float16, (SCENE_TOKENS, TOKEN_DIM)),
-    "proprio": (np.float32, (N_ACTION,)),
+    "proprio": (np.float32, (PROPRIO_DIM,)),
     "action": (np.float32, (N_ACTION,)),
     "h": (np.float32, ()),
     "embodiment_id": (np.int8, ()),

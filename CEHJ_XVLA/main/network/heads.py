@@ -2,7 +2,8 @@
 
 Same HJ-SAC structure as the joint-space heads (TokenActor/TwinCritic in the
 main project) but the action is X-VLA's EE6D: per arm [dx, dy, dz, drot6d(6),
-dgripper] — 10 dims per arm, 20 total per tick.
+dgripper] — the filter drops the gripper: 9 dims per arm,
+# 18 total per tick.
 
 Representation in:  scene tokens [B, M, 256] (X-VLA adapter output) +
 per-arm proprio tokens [B, 2, 256] (XVLAEncoder.encode_proprio). A plain
@@ -22,8 +23,9 @@ import torch
 from torch import nn
 
 _LOG_2PI_HALF = 0.5 * math.log(2 * math.pi)
-EE6D_ARM_DIM = 10  # xyz(3) + rot6d(6) + gripper(1)
-N_ACTION = 20      # two arms
+EE6D_ARM_DIM = 9   # xyz(3) + rot6d(6) — no gripper: the safety
+                     # filter never drives the gripper
+N_ACTION = 18      # two arms
 
 
 class EE6DTrunk(nn.Module):

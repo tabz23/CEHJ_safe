@@ -187,7 +187,7 @@ class Trainer:
         if target:
             scene = self.adapter_targ(scene_raw)            # [B, 200, 256]
             arm = self.proprio_enc_targ(
-                proprio.view(-1, 2, N_ACTION // 2))
+                proprio.view(-1, 2, 10))  # X-VLA proprio is 10/arm (with grip)
         else:
             scene = self.encoder.adapter(scene_raw)
             arm = self.encoder.encode_proprio(proprio)      # [B, 2, 256]

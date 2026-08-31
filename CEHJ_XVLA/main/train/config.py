@@ -43,13 +43,11 @@ def instruction_for(task: str) -> str:
 class FrozenConfig:
     # problem definition (change what V means)
     control_dt: float = 0.04            # 25 Hz control: 250/25 = exactly 10 physics steps/tick
-    # per-dim EE6D action bound per tick (one arm's 10-dim block, applied to
+    # per-dim EE6D action bound per tick (one arm's 9-dim block, applied to
     # both arms): xyz 0.05 m/tick at 25 Hz (= 1.25 m/s), rot6d 0.1
-    # (~0.1 rad-equivalent on the two stored columns), gripper 1.0 (full
-    # range of the 1-2g gripper channel per tick)
+    # (~0.1 rad-equivalent on the two stored columns); no gripper channel
     ee_step_max: tuple = (0.05, 0.05, 0.05,
-                          0.1, 0.1, 0.1, 0.1, 0.1, 0.1,
-                          1.0)
+                          0.1, 0.1, 0.1, 0.1, 0.1, 0.1)  # no gripper dim
     softmin_T: float = 0.02             # metres; softmin temperature
     gamma: float = 0.9                  # HJ discount (annealed -> gamma_final)
     gamma_final: float = 0.999
