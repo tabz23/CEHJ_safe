@@ -76,6 +76,18 @@ python main/train/train.py --collect-rounds 10 --episodes-per-round 3 \
   process + trainer, checkpoint-follow). Faster wall-clock (collection hides
   behind training); round mode is the debuggable default.
 
+## Standard training (production defaults)
+
+```
+python main/train/train.py --collect-rounds 40 --grad-steps-per-round 1024 \
+    --eval-every 1024 --leave-out franka-panda \
+    --init-from <ckpt> --buffer-dir <local>/buffer \
+    --data <data_dir> --run <run_dir>
+```
+
+40 rounds x 1024 grad steps, full 5x4 (pool) episode product per round,
+cross-eval on the held-out embodiment every 10 epochs.
+
 ## Ablations
 
 `--ablate-geometry` — no (log-dist, direction) attention bias and no
