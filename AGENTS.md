@@ -221,6 +221,10 @@ q/precision-recall, actor/action_std, and the videos for the filter engaging.
   token. If direct times out, use the AutoDL turbo proxy:
   `https_proxy=http://10.37.1.23:12798 git push ...`
 - Never commit `data/` (memmaps) or `wandb/` — gitignored.
+- cuRobo init fails with Warp NVRTC "cannot open temporary file" when TMPDIR
+  is missing/unwritable — `export TMPDIR=/tmp`. The mplib RRT fallback then
+  silently takes over (slower, no constraints) — grep the log for
+  "CuRobo init failed".
 
 ## Quick checks
 
