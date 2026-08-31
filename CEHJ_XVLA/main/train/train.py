@@ -511,7 +511,15 @@ def main() -> None:
         import wandb
 
         try:
-            run = wandb.init(project="cehj-hjsac", dir=str(args.run))
+            tags = []
+            if getattr(args, "leave_out", None):
+                tags.append(f"loo-{args.leave_out}")
+            if getattr(args, "only_embodiment", None):
+                tags.append(f"only-{args.only_embodiment}")
+            tags.append(f"r{args.collect_rounds}x{args.episodes_per_round or 'full'}")
+            run_name = "xvla_" + "_".join(tags)
+            run = wandb.init(project="cehj-hjsac", name=run_name,
+                             dir=str(args.run))
         except Exception as exc:
             # wandb being flaky must never take training down
             print(f"[train] wandb.init failed ({exc}); continuing offline")

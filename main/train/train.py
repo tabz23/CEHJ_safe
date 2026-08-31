@@ -512,12 +512,30 @@ def main() -> None:
     args.data = args.data.resolve()
     args.run = args.run.resolve()  # RoboTwin chdirs during env creation
 
+    # meaningful run name: split + ablation + scale, e.g.
+    # "hjsac_loo-franka-panda_r100" or "hjsac_full_vanilla_r40"
+    tags = []
+    if getattr(args, "leave_out", None):
+        tags.append(f"loo-{args.leave_out}")
+    if getattr(args, "only_embodiment", None):
+        tags.append(f"only-{args.only_embodiment}")
+    if getattr(args, "vanilla", False):
+        tags.append("vanilla")
+    else:
+        if getattr(args, "ablate_geometry", False):
+            tags.append("nogeo")
+        if getattr(args, "ablate_injection", False):
+            tags.append("noinj")
+    tags.append(f"r{args.collect_rounds}x{args.episodes_per_round or 'full'}")
+    run_name = "hjsac_" + "_".join(tags)
+
     run = None
     if not args.no_wandb:
         import wandb
 
         try:
-            run = wandb.init(project="cehj-hjsac", dir=str(args.run))
+            run = wandb.init(project="cehj-hjsac", name=run_name,
+                             dir=str(args.run))
         except Exception as exc:
             # wandb being flaky must never take training down
             print(f"[train] wandb.init failed ({exc}); continuing offline")
