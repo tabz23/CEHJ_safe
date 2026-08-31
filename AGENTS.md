@@ -123,6 +123,23 @@ cross_overview/ + cross_heatmap/ + cross_videos.
 
   behind training) but round mode is the debuggable default.
 
+## Test training (fast pipeline check)
+
+Reuse the existing warmup buffer and resume from any checkpoint; small
+rounds keep the loop tight (~5 min/round):
+
+```
+python main/train/train.py --collect-rounds 10 --episodes-per-round 3 \
+    --grad-steps-per-round 256 --eval-every 256 \
+    --init-from <run_dir>/checkpoint.pt --buffer-dir <local>/buffer \
+    --data <data_dir> --run <run_dir>
+```
+
+Per round you get: filter-episode videos (`round_videos` carousel in wandb +
+`eval/videos/`), per-metric heatmaps + trend.png under `eval/<metric>/`, and
+`round_overview/*` scalars in wandb. Watch violation_* rates, v_le_h_frac,
+q/precision-recall, actor/action_std, and the videos for the filter engaging.
+
 ## Buffer (`main/train/buffer.py`)
 
 - Flat per-step memmap, ~630 KB/step (dominated by fp16 scene tokens).
