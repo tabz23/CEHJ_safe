@@ -153,7 +153,39 @@ class CuroboIKController:
 
         CuroboPlanner.__init__ = _cached_curobo_init
 
+        def _mplib_plan_batch(planner, curr_joint_pos, target_gripper_pose_list,
+                              constraint_pose=None, arms_tag=None):
+            """plan_batch shim for the mplib fallback: CuroboPlanner has it,
+            MplibPlanner does not (upstream RoboTwin never added it), so the
+            fallback crashed any multi-pose call (choose_best_pose) with
+            AttributeError. Loops plan_path and assembles the same
+            {status, position, velocity} arrays."""
+            import numpy as np
+
+            n = len(target_gripper_pose_list)
+            status = np.array(["Failure"] * n, dtype=object)
+            positions, velocities = [], []
+            for i, pose in enumerate(target_gripper_pose_list):
+                try:
+                    r = planner.plan_path(curr_joint_pos, pose,
+                                          arms_tag=arms_tag, log=False)
+                except Exception:
+                    r = {"status": "Fail"}
+                if r.get("status") == "Success":
+                    status[i] = "Success"
+                    positions.append(np.asarray(r["position"]))
+                    velocities.append(np.asarray(
+                        r.get("velocity", np.zeros_like(np.asarray(r["position"])))
+                    ))
+            out = {"status": status}
+            if positions:
+                out["position"] = np.stack(positions)
+                out["velocity"] = np.stack(velocities)
+            return out
+
         def _mplib_pair(robot, scene=None):
+            import types
+
             robot.communication_flag = False
             robot.left_mplib_planner = MplibPlanner(
                 robot.left_urdf_path,
@@ -173,6 +205,8 @@ class CuroboIKController:
                 "mplib_RRT",
                 scene,
             )
+            for p in (robot.left_mplib_planner, robot.right_mplib_planner):
+                p.plan_batch = types.MethodType(_mplib_plan_batch, p)
             return robot.left_mplib_planner, robot.right_mplib_planner
 
         def set_planner(self, scene=None):
