@@ -473,6 +473,9 @@ def main() -> None:
                         "episodes); 0 = disabled (default — round-based "
                         "training gets filter metrics from the collection "
                         "episodes via RoundMetrics)")
+    p.add_argument("--warmup-episodes", type=int, default=0,
+                   help="no warmup buffer? collect N success-only nominal "
+                        "episodes first (capacity sized for them)")
     p.add_argument("--collect-rounds", type=int, default=0,
                    help=">0: DAgger loop — collect N rounds (round 0 "
                         "nominal-only, later rounds cfg.filter_episode_frac "
@@ -544,8 +547,9 @@ def main() -> None:
         eff_buf = (Path(args.buffer_dir).resolve() if args.buffer_dir
                    else args.run / "buffer")
         warmup_exists = (eff_buf / "header.json").exists()
+        n_warm = 0 if warmup_exists else args.warmup_episodes
         n_collects = args.collect_rounds + (0 if warmup_exists else 1)
-        capacity = (n_collects * n_ep
+        capacity = ((n_warm + n_collects * n_ep)
                     * (cfg.max_steps_per_episode + 2)) if not warmup_exists else None
         trainer = Trainer(cfg, args.data, args.run, create_capacity=capacity,
                                   buffer_dir=args.buffer_dir)
@@ -567,10 +571,18 @@ def main() -> None:
         # ids clear of them (ids are diagnostic only)
         id_base = 10_000 if warmup_exists else 0
         if not warmup_exists:
-            cfg_w = dataclasses.replace(cfg, n_episodes=n_ep)
-            collect(cfg_w, args.data, buf=trainer.buf, episode_offset=0,
-                    encoder=trainer._eval_encoder, models=None,
-                    round_index=0)
+            if n_warm > 0:
+                # from-scratch: success-only nominal warmup (same semantics as
+                # collect.py --success-only), videos recorded
+                cfg_w = dataclasses.replace(cfg, n_episodes=n_warm)
+                collect(cfg_w, args.data, buf=trainer.buf, episode_offset=0,
+                        encoder=trainer._eval_encoder, models=None,
+                        round_index=0, success_only=True, record_video=True)
+            else:
+                cfg_w = dataclasses.replace(cfg, n_episodes=n_ep)
+                collect(cfg_w, args.data, buf=trainer.buf, episode_offset=0,
+                        encoder=trainer._eval_encoder, models=None,
+                        round_index=0)
         vid_dir = args.run / "eval" / "videos"
         # cross-embodiment eval: every 10 epochs, 3 filtered episodes on the
         # embodiment(s) excluded from training (LOO), tasks rotating

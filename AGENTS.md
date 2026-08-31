@@ -155,6 +155,11 @@ python main/train/train.py --collect-rounds 10 --episodes-per-round 3 \
 drops its samples, and the cross-embodiment sweep on franka runs every 10
 epochs — see below.)
 
+From scratch (no warmup buffer): add `--warmup-episodes 20` and drop
+`--init-buffer`/`--init-from` — the trainer first collects 20 success-only
+nominal episodes with videos, then starts the rounds. Buffer capacity is
+sized for warmup + all rounds up front.
+
 Per round you get: filter-episode videos (`round_videos` carousel in wandb +
 `eval/videos/`), per-metric heatmaps + trend.png under `eval/<metric>/`, and
 `round_overview/*` scalars in wandb. Watch violation_* rates, v_le_h_frac,
