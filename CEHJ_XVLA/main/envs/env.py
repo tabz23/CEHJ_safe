@@ -1,0 +1,766 @@
+"""RoboTwin 2.0 environment setup."""
+
+from __future__ import annotations
+
+import importlib
+import os
+import re
+import subprocess
+import sys
+from functools import lru_cache
+from pathlib import Path
+
+import yaml
+
+CEHJ_ROOT = Path(__file__).resolve().parent.parent.parent
+ROBOTWIN_ROOT = CEHJ_ROOT / "RoboTwin"
+if not ROBOTWIN_ROOT.is_dir():
+    ROBOTWIN_ROOT = CEHJ_ROOT.parent / "RoboTwin"
+if not ROBOTWIN_ROOT.is_dir():
+    # CEHJ_XVLA nests one level deeper (CEHJ_safe/CEHJ_XVLA/main/...)
+    ROBOTWIN_ROOT = CEHJ_ROOT.parent.parent / "RoboTwin"
+
+# Render observer at 2x, then downsample to stock 320x240 for saved videos.
+# 2x SSAA + MSAA 2 is a mild cost bump (one extra camera, every record step).
+DEFAULT_MSAA = 2
+STOCK_OBSERVER_SIZE = (320, 240)
+RECORD_SIZE = (320, 256)
+DEFAULT_OBSERVER_SIZE = (640, 480)
+
+ALIASES = {
+    "piper": "piper",
+    "franka": "franka-panda",
+    "franka-panda": "franka-panda",
+    "ur5": "ur5-wsg",
+    "ur5-wsg": "ur5-wsg",
+    "arx": "ARX-X5",
+    "arx-x5": "ARX-X5",
+    "ARX-X5": "ARX-X5",
+    "aloha": "aloha-agilex",
+    "aloha-agilex": "aloha-agilex",
+}
+
+
+def resolve_embodiment(name: str) -> str:
+    key = name.strip()
+    if key in ALIASES:
+        return ALIASES[key]
+    if key.lower() in ALIASES:
+        return ALIASES[key.lower()]
+    raise KeyError(f"Unknown embodiment {name!r}")
+
+
+def _quat_wxyz_to_rot(q: "np.ndarray") -> "np.ndarray":
+    """wxyz quaternion (SAPIEN convention) -> 3x3 rotation matrix."""
+    import numpy as np
+
+    w, x, y, z = q / np.linalg.norm(q)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+# Datacenter compute GPUs without RT cores (H100, A100, ...).
+_NO_RT_RE = re.compile(
+    r"\b(h100|h200|h800|h20|a100|a800|a30|v100|p100|p40|b100|b200|gb200)\b",
+    re.I,
+)
+# Professional / GeForce GPUs with RT cores (RTX, A40, L40S, ...).
+_HAS_RT_RE = re.compile(r"(rtx|\ba40\b|\bl40s?\b|\bl4\b|\ba10\b|\ba16\b)", re.I)
+# CUDA SMs that expose RT cores SAPIEN can use.
+_RT_SMS = {(7, 5), (8, 6), (8, 9), (12, 0)}
+_NO_RT_SMS = {(8, 0), (9, 0), (10, 0), (10, 3)}
+
+
+@lru_cache(maxsize=1)
+def _gpu_name() -> str:
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            text=True,
+            timeout=5,
+        )
+        line = out.strip().splitlines()
+        if line:
+            return line[0].strip()
+    except Exception:
+        pass
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return str(torch.cuda.get_device_name(0))
+    except Exception:
+        pass
+    return ""
+
+
+def _gpu_capability() -> tuple[int, int] | None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability(0)
+            return int(major), int(minor)
+    except Exception:
+        pass
+    return None
+
+
+def gpu_supports_ray_tracing() -> bool:
+    """True for RTX / A40 / L40S-class GPUs; False for H100 / A100-class."""
+    name = _gpu_name()
+    if name and _NO_RT_RE.search(name):
+        return False
+    if name and _HAS_RT_RE.search(name):
+        return True
+    cap = _gpu_capability()
+    if cap in _RT_SMS:
+        return True
+    if cap in _NO_RT_SMS:
+        return False
+    return False
+
+
+def use_ray_tracing() -> bool:
+    return os.environ.get("SAPIEN_DISABLE_RAY_TRACING", "1") != "1"
+
+
+os.environ.setdefault(
+    "SAPIEN_DISABLE_RAY_TRACING",
+    "0" if gpu_supports_ray_tracing() else "1",
+)
+
+
+def prepare() -> None:
+    if not ROBOTWIN_ROOT.is_dir():
+        raise FileNotFoundError(f"RoboTwin missing: {ROBOTWIN_ROOT}")
+    if str(ROBOTWIN_ROOT) not in sys.path:
+        sys.path.insert(0, str(ROBOTWIN_ROOT))
+    os.chdir(ROBOTWIN_ROOT)
+
+
+def configure_rendering(msaa: int = DEFAULT_MSAA) -> None:
+    name = _gpu_name() or "unknown GPU"
+    if use_ray_tracing():
+        print(f"[env] {name}: ray tracing")
+        enable_ray_tracing()
+        return
+    print(f"[env] {name}: rasterization (no RT cores)")
+    force_rasterization(msaa=msaa)
+
+
+def force_rasterization(msaa: int = DEFAULT_MSAA) -> None:
+    import sapien.core as sapien_core
+    import sapien.render
+    from envs import _base_task
+
+    def _set_msaa(value: int) -> None:
+        if int(value) <= 1:
+            return
+        try:
+            sapien.render.set_msaa(int(value))
+            print(f"[env] MSAA={sapien.render.get_msaa()}")
+        except Exception as exc:
+            print(f"[env] set_msaa({value}) failed: {exc}")
+
+    force_rasterization._msaa = int(msaa)
+    if getattr(sapien.render.set_camera_shader_dir, "_cehj_raster", False):
+        _set_msaa(msaa)
+        return
+
+    orig = sapien.render.set_camera_shader_dir
+    orig_global = sapien.render.set_global_config
+
+    def set_camera_shader_dir(name: str = "default"):
+        if name == "rt":
+            name = "default"
+        return orig(name)
+
+    def _noop(*_a, **_k):
+        return None
+
+    def set_global_config(*args, **kwargs):
+        orig_global(*args, **kwargs)
+        _set_msaa(getattr(force_rasterization, "_msaa", msaa))
+
+    set_camera_shader_dir._cehj_raster = True
+    for mod in (sapien.render, sapien_core.render, _base_task.sapien.render):
+        mod.set_camera_shader_dir = set_camera_shader_dir
+        mod.set_ray_tracing_samples_per_pixel = _noop
+        mod.set_ray_tracing_path_depth = _noop
+        mod.set_ray_tracing_denoiser = _noop
+        mod.set_global_config = set_global_config
+    sapien.render.set_camera_shader_dir("default")
+    _set_msaa(msaa)
+
+
+def enable_ray_tracing(samples_per_pixel: int = 32, path_depth: int = 8) -> None:
+    """Use SAPIEN ray tracing shaders (requires an RTX GPU).
+
+    RoboTwin's base task already requests the "rt" shader; this simply
+    ensures the request is honoured instead of patched away.
+    """
+    import sapien.render
+
+    sapien.render.set_camera_shader_dir("rt")
+    sapien.render.set_ray_tracing_samples_per_pixel(samples_per_pixel)
+    sapien.render.set_ray_tracing_path_depth(path_depth)
+    sapien.render.set_ray_tracing_denoiser("oidn")
+
+
+def patch_observer_resolution(width: int, height: int) -> None:
+    """Replace RoboTwin's 320x240 observer with a finer raster camera after load."""
+    from envs.camera.camera import Camera
+
+    if getattr(Camera.load_camera, "_cehj_hires", False):
+        Camera._cehj_observer_size = (int(width), int(height))
+        return
+    orig = Camera.load_camera
+
+    def load_camera(self, scene):
+        orig(self, scene)
+        w, h = getattr(Camera, "_cehj_observer_size", (width, height))
+        old = self.observer_camera
+        if old.get_width() == w and old.get_height() == h:
+            return
+        pose = old.entity.get_pose() if hasattr(old, "entity") else old.get_global_pose()
+        new = scene.add_camera(
+            name="observer_camera",
+            width=int(w),
+            height=int(h),
+            fovy=float(old.fovy),
+            near=float(old.near),
+            far=float(old.far),
+        )
+        new.entity.set_pose(pose)
+        try:
+            scene.remove_camera(old)
+        except Exception:
+            pass
+        self.observer_camera = new
+        print(f"[env] observer camera {w}x{h} (was {old.get_width()}x{old.get_height()})")
+
+    load_camera._cehj_hires = True
+    Camera._cehj_observer_size = (int(width), int(height))
+    Camera.load_camera = load_camera
+
+
+def _load_yaml(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.load(handle.read(), Loader=yaml.FullLoader)
+
+
+TABLETOP_QPOS = {
+    "piper": {
+        "left": (0.35, 1.15, -0.90, 0.0, 0.70, 0.0),
+        "right": (-0.35, 1.15, -0.90, 0.0, 0.70, 0.0),
+    },
+    "franka-panda": {
+        "left": (0.0, 0.19634954084936207, 0.0, -2.617993877991494, 0.0, 2.941592653589793, 0.7853981633974483),
+        "right": (0.0, 0.19634954084936207, 0.0, -2.617993877991494, 0.0, 2.941592653589793, 0.7853981633974483),
+    },
+    "ur5-wsg": {
+        "left": (-1.5447, -1.5447, -1.5447, -1.5794, 1.5794, 0.0),
+        "right": (-1.5447, -1.5447, -1.5447, -1.5794, 1.5794, 0.0),
+    },
+    "ARX-X5": {
+        "left": (0.1276, 1.1426, 1.4179, -0.9723, 0.0, 0.0),
+        "right": (-0.1276, 1.1426, 1.4179, -0.9723, 0.0, 0.0),
+    },
+}
+
+
+def _task_args(
+    task: str,
+    embodiment: str,
+    seed: int,
+    arm_distance: float,
+    cluttered: bool = False,
+) -> dict:
+    from envs._GLOBAL_CONFIGS import CONFIGS_PATH
+
+    template = _load_yaml(Path(CONFIGS_PATH) / "demo_clean.yml")
+    types = _load_yaml(Path(CONFIGS_PATH) / "_embodiment_config.yml")
+    if embodiment not in types or types[embodiment]["file_path"] is None:
+        raise KeyError(f"Unknown embodiment {embodiment!r}")
+
+    robot_file = str(Path(types[embodiment]["file_path"]))
+    cfg = _load_yaml(Path(robot_file) / "config.yml")
+    dual = bool(cfg.get("dual_arm", False))
+    args = dict(template)
+    args.update(
+        {
+            "task_name": task,
+            "task_config": "demo_clean",
+            "seed": seed,
+            "now_ep_num": 0,
+            "render_freq": 0,
+            "save_data": False,
+            "collect_data": False,
+            "eval_mode": False,
+            "need_plan": True,
+            "dual_arm": dual,
+            "dual_arm_embodied": dual,
+            "embodiment": [embodiment] if dual else [embodiment, embodiment, arm_distance],
+            "embodiment_name": embodiment,
+            "embodiment_dis": None if dual else arm_distance,
+            "left_robot_file": robot_file,
+            "right_robot_file": robot_file,
+            "left_embodiment_config": cfg,
+            "right_embodiment_config": cfg,
+            "eval_video_save_dir": None,
+        }
+    )
+    args["camera"] = dict(args.get("camera") or {})
+    # RoboTwin `_camera_config.yml` only lists D435 / Large_D435 / L515.
+    # D435_256 was an HJ-encoder leftover and KeyErrors every eval episode.
+    args["camera"].setdefault("head_camera_type", "D435")
+    args["camera"].setdefault("wrist_camera_type", "D435")
+    args["camera"].update(
+        collect_head_camera=True,
+        collect_wrist_camera=True,
+    )
+    args["data_type"] = dict(args.get("data_type") or {})
+    args["data_type"].update(rgb=True, depth=True, pointcloud=False, endpose=False, qpos=True)
+    dr = dict(args.get("domain_randomization") or {})
+    if cluttered:
+        dr["cluttered_table"] = True
+        dr["clean_background_rate"] = 0.0
+    else:
+        dr["cluttered_table"] = False
+    args["domain_randomization"] = dr
+    return args
+
+
+class Env:
+    """One RoboTwin 2.0 task episode."""
+
+    PHYSICS_FREQ = 250.0  # RoboTwin scene timestep is 1/250 s (_base_task.setup_scene)
+
+    def __init__(
+        self,
+        task: str = "place_empty_cup",
+        embodiment: str = "piper",
+        seed: int = 0,
+        arm_distance: float = 0.6,
+        cluttered: bool = False,
+        settle: bool = True,
+        msaa: int = DEFAULT_MSAA,
+        observer_size: tuple[int, int] = DEFAULT_OBSERVER_SIZE,
+        record_size: tuple[int, int] = RECORD_SIZE,
+        control_freq: float = 25.0,
+        real_time: bool = False,
+    ):
+        prepare()
+        configure_rendering(msaa=msaa)
+        if tuple(observer_size) != STOCK_OBSERVER_SIZE:
+            patch_observer_resolution(*observer_size)
+        self.task_name = task
+        self.embodiment = resolve_embodiment(embodiment)
+        self.seed = seed
+        self.cluttered = cluttered
+        self.obstacle = None
+        self.record_size = tuple(int(v) for v in record_size)
+        self.observer_size = tuple(int(v) for v in observer_size)
+        self.control_freq = float(control_freq)
+        self.real_time = bool(real_time)
+        self._rt_next = None
+        self.n_overruns = 0
+        self.n_control_steps = 0
+        self.n_physics_steps = 0
+        self._substep_acc = 0.0
+        module = importlib.import_module(f"envs.{task}")
+        self.task = getattr(module, task)()
+        self.task.setup_demo(
+            **_task_args(task, self.embodiment, seed, arm_distance, cluttered=cluttered)
+        )
+        from .obstacle import stretch_task_spawns
+
+        stretch_task_spawns(self)
+        if settle:
+            self.settle_arms()
+
+    @property
+    def robot(self):
+        return self.task.robot
+
+    @property
+    def control_dt(self) -> float:
+        """Seconds per control step."""
+        return 1.0 / self.control_freq
+
+    @property
+    def sim_time(self) -> float:
+        """Episode time in seconds (physics steps so far / PHYSICS_FREQ)."""
+        return self.n_physics_steps / self.PHYSICS_FREQ
+
+    def get_obs(self):
+        return self.task.get_obs()
+
+    def compute_T_base2world(self, kin) -> "np.ndarray":
+        """Kinematics root frame (dual-arm URDF base frame) in world [4, 4].
+
+        Empirical FK alignment at the FIRST left-arm link: the HoloBrain
+        dual-arm URDFs and the RoboTwin sim URDF share the physical arm
+        kinematics but differ in base-frame convention (ckpt URDFs carry no
+        mount rotation; ur5's ckpt URDF offsets the left arm by (-0.4,0,0)),
+        so we solve the root transform instead of hand-coding it per
+        embodiment. Measured on piper: exactly Rz(-90) vs the SAPIEN base
+        link. Cached.
+        """
+        import numpy as np
+        import torch
+
+        if getattr(self, "_T_base2world", None) is not None:
+            return self._T_base2world
+        js = torch.tensor(
+            [self.robot.get_left_arm_real_jointState()
+             + self.robot.get_right_arm_real_jointState()],
+            dtype=torch.float32,
+        )
+        mats = kin.joint_state_to_robot_state(js, return_matrix=True)
+        fk0 = mats.reshape(-1, 4, 4)[0].double().numpy()  # first left-arm link
+        if hasattr(kin, "arm_link_keys"):
+            key0 = kin.arm_link_keys[0][0]
+        else:
+            key0 = kin.left_arm_link_keys[0]
+        links = {l.get_name(): l for l in self.robot.left_entity.get_links()}
+        candidates = [key0]
+        for pre in ("left_", "right_"):
+            if key0.startswith(pre):
+                candidates.append(key0[len(pre):])
+        name = next((c for c in candidates if c in links), None)
+        assert name is not None, f"no SAPIEN link matching {key0!r}"
+        p = links[name].get_pose()
+        T_wl = np.eye(4)
+        T_wl[:3, 3] = np.asarray(p.p, dtype=np.float64)
+        T_wl[:3, :3] = _quat_wxyz_to_rot(np.asarray(p.q, dtype=np.float64))
+        self._T_base2world = T_wl @ np.linalg.inv(fk0)
+        return self._T_base2world
+
+    # HoloBrain GD image normalization (0-255 scale)
+    ENCODER_IMG_MEAN = (123.675, 116.28, 103.53)
+    ENCODER_IMG_STD = (58.395, 57.12, 57.375)
+    ENCODER_IMG_WH = (320, 256)  # HoloBrain GD training resolution (dst_wh)
+
+    @staticmethod
+    def camera_extrinsic(cam) -> "np.ndarray":
+        """Canonical world->camera extrinsic [4, 4] for a SAPIEN camera.
+
+        This is the single source for every consumer (projection matrices,
+        T_cam_world). Verified by the marker projection test.
+        """
+        import numpy as np
+
+        ext = np.asarray(cam.get_extrinsic_matrix(), dtype=np.float64)
+        if ext.shape == (3, 4):
+            ext = np.vstack([ext, [0.0, 0.0, 0.0, 1.0]])
+        return ext
+
+    def get_encoder_obs(self, kin=None) -> dict:
+        """Observation bundle matching HoloBrain's own inference pipeline.
+
+        Parity with HoloBrain's deploy transforms (robotwin2_0_ur5_wsg
+        processor): camera order [left_wrist, right_wrist, HEAD] (head LAST
+        — it is the ego anchor), images resized to 320x256 with intrinsics
+        rescaled, depth alpha-masked, and the projection matrices in the EGO
+        (head-camera) frame, as in GetProjectionMat(target_coordinate="ego"):
+
+            P_c = K_c @ ext_c @ inv(ext_head)        (base frame cancels)
+
+        Token positions come out ego-frame; pass out_extrinsic=T_ego2world
+        to encode_visual_tokens to get world metres for the trunk. The robot
+        state encoder gets ego-frame FK via embodiedment_mat=T_base2ego
+        (HoloBrain's own convention).
+
+            obs = env.get_encoder_obs(kin)
+            tokens, pos_mean, _ = encoder.encode_visual_tokens(
+                obs["imgs"], obs["depths"], obs["image_wh"],
+                obs["projection_mat"], out_extrinsic=obs["T_ego2world"],
+            )
+            state = encoder.encode_joint_angles(
+                obs["joint_state"], kin, embodiedment_mat=obs["T_base2ego"])
+
+        Keys:
+            imgs:         [1, 3, 3, 256, 320] float32 RGB, HoloBrain-normalized.
+            depths:       [1, 3, 1, 256, 320] float32 metric depth (meters),
+                          geometry-masked (void pixels = 0; RoboTwin's uint8
+                          alpha mask emulated for HDR/RT pictures).
+            image_wh:     [3, 2] int (width, height) = (320, 256).
+            projection_mat: [1, 3, 4, 4] float64, ego frame (see above).
+            T_ego2world:  [4, 4] ego(head-cam)->world; pass as out_extrinsic.
+            T_base2ego:   [4, 4] kin-root->ego; pass as embodiedment_mat.
+            T_cam_world:  [4, 4] world->head-cam (legacy alias of ext_head).
+            joint_state:  [1, 1, n] float32 MEASURED [Larm, gripL, Rarm, gripR]
+                          (measured, not commanded: the safety filter needs
+                          physical truth — the gap is logged as joint_cmd_gap).
+            joint_cmd_gap: float, max |commanded - measured| (diagnostic).
+            rgb:          list of raw uint8 frames (resized, visualization).
+            camera_names: ["left_wrist", "right_wrist", "head"].
+        """
+        import cv2
+        import numpy as np
+        import torch
+
+        # CRITICAL with ray tracing: the RT renderer keeps its own copy of
+        # the scene — without this sync, take_picture renders a STALE state
+        # (obstacles spawned since the last sync are invisible, arm poses lag)
+        self.task._update_render()
+        cams = self.task.cameras
+        cam_list = [cams.left_camera, cams.right_camera,
+                    cams.static_camera_list[cams.head_camera_id]]
+        names = ["left_wrist", "right_wrist", "head"]
+        W, H = self.ENCODER_IMG_WH
+        rgbs, depths, projs, exts = [], [], [], []
+        for cam in cam_list:
+            cam.take_picture()
+            rgba = cam.get_picture("Color")
+            rgb = (rgba * 255).clip(0, 255).astype(np.uint8)[:, :, :3]
+            pos = cam.get_picture("Position")
+            # depth mask: with RT the Color picture is HDR float and alpha is
+            # NOT 0/1 opacity (measured 1.2-5.0), so emulate RoboTwin's
+            # uint8-alpha mask (camera.py:431-445): real geometry keeps its
+            # depth, void = 0. Position.w < 1 marks valid geometry
+            # (RoboTwin's own pcd convention).
+            alpha = np.clip(rgba[:, :, 3], 0, 1).astype(np.float32)
+            valid = (pos[:, :, 3] < 1).astype(np.float32)
+            depth = np.asarray(-pos[:, :, 2], dtype=np.float32)
+            depth = depth * alpha * valid
+            K = np.asarray(cam.get_intrinsic_matrix(), dtype=np.float64)
+            h0, w0 = rgb.shape[:2]
+            if (w0, h0) != (W, H):
+                rgb = cv2.resize(rgb, (W, H))
+                depth = cv2.resize(depth, (W, H), interpolation=cv2.INTER_NEAREST)
+                K = K.copy()
+                K[0, :] *= W / w0
+                K[1, :] *= H / h0
+            exts.append(self.camera_extrinsic(cam))
+            rgbs.append(rgb)
+            depths.append(depth)
+            projs.append(K)
+        # ego frame = head camera (LAST in the list)
+        ext_head = exts[-1]
+        T_ego2world = np.linalg.inv(ext_head)
+        for i in range(len(cam_list)):
+            ext_c_to_ego = exts[i] @ T_ego2world
+            K = projs[i]
+            proj = np.eye(4, dtype=np.float64)
+            proj[:3, :4] = K @ ext_c_to_ego[:3]
+            projs[i] = proj
+
+        T_base2ego = (ext_head @ self.compute_T_base2world(kin)
+                      if kin is not None else None)
+
+        imgs = np.stack(rgbs)[None].astype(np.float32)
+        imgs = (imgs - np.array(self.ENCODER_IMG_MEAN)) / np.array(self.ENCODER_IMG_STD)
+        left = self.robot.get_left_arm_real_jointState()
+        right = self.robot.get_right_arm_real_jointState()
+        # commanded-vs-measured gap (diagnostic: HoloBrain trained on drive
+        # targets; we feed measured — log how far apart they are)
+        cmd = np.array(
+            self.robot.get_left_arm_jointState()
+            + self.robot.get_right_arm_jointState(),
+            dtype=np.float64,
+        )
+        meas = np.array(left + right, dtype=np.float64)
+        cmd_gap = float(np.abs(cmd - meas)[: len(cmd)].max()) if len(cmd) == len(meas) else float("nan")
+        return {
+            "imgs": torch.from_numpy(imgs).permute(0, 1, 4, 2, 3),
+            "depths": torch.from_numpy(np.stack(depths)[None, :, None]),
+            "image_wh": torch.tensor([[W, H]] * len(cam_list)),
+            "projection_mat": torch.from_numpy(np.stack(projs)[None]),
+            "T_ego2world": T_ego2world,
+            "T_base2ego": T_base2ego,
+            "T_cam_world": ext_head,
+            "joint_state": torch.tensor(
+                [left + right], dtype=torch.float32
+            )[None],
+            "joint_cmd_gap": cmd_gap,
+            "rgb": rgbs,
+            "camera_names": names,
+        }
+
+    def get_xvla_obs(self) -> dict:
+        """Observation bundle for the X-VLA EE6D baseline.
+
+        Keys:
+            images:    list of 3 uint8 RGB frames in X-VLA view order
+                       [head, left_wrist, right_wrist] — raw camera
+                       resolution (the X-VLA processor resizes to 224).
+            ee_poses:  (left, right), each [x, y, z, qw, qx, qy, qz] — the
+                       RoboTwin gripper-pose convention of
+                       robot.get_left/right_ee_pose() (wxyz quaternion,
+                       gripper frame NOT tcp).
+            grippers:  (left, right) measured normalized opening in
+                       [0, 1] (1 = open).
+        """
+        import numpy as np
+
+        # RT renderer keeps its own scene copy — sync before take_picture
+        # or the frames are stale (see get_encoder_obs)
+        self.task._update_render()
+        cams = self.task.cameras
+        cam_list = [cams.static_camera_list[cams.head_camera_id],
+                    cams.left_camera, cams.right_camera]
+        frames = []
+        for cam in cam_list:
+            cam.take_picture()
+            rgba = cam.get_picture("Color")
+            frames.append((rgba * 255).clip(0, 255).astype(np.uint8)[:, :, :3])
+        left_ee = np.asarray(self.robot.get_left_ee_pose(), dtype=np.float64)
+        right_ee = np.asarray(self.robot.get_right_ee_pose(), dtype=np.float64)
+        grips = self.robot.get_normal_real_gripper_val()
+        return {
+            "images": frames,
+            "camera_names": ["head", "left_wrist", "right_wrist"],
+            "ee_poses": (left_ee, right_ee),
+            "grippers": (float(grips[0]), float(grips[1])),
+        }
+
+    def step_dtheta(self, dtheta, grip_left=None, grip_right=None) -> float:
+        """Apply a per-joint DISPLACEMENT action (actor/critic layout
+        [L j1..jn, R j1..jn], n = arm joints + 2 prismatic slots per arm;
+        prismatic slots ignored) and advance one control step.
+
+        Bridges to step()'s absolute targets:
+        [theta_L + dL, gripL, theta_R + dR, gripR]; grippers hold their
+        current opening unless grip_left/right are given (normalized
+        [0,1] absolute targets). Embodiment-agnostic: arm joint counts
+        come from the robot's real joint states (piper 6, franka 7).
+        """
+        import numpy as np
+
+        d = np.asarray(dtheta, dtype=np.float64).reshape(-1)
+        left = np.array(self.robot.get_left_arm_real_jointState(),
+                        dtype=np.float64)
+        right = np.array(self.robot.get_right_arm_real_jointState(),
+                         dtype=np.float64)
+        n_l, n_r = len(left) - 1, len(right) - 1  # gripper scalar is last
+        per_arm = d.shape[0] // 2
+        a = np.concatenate(
+            [
+                left[:n_l] + d[:n_l],
+                [left[n_l] if grip_left is None else grip_left],
+                right[:n_r] + d[per_arm:per_arm + n_r],
+                [right[n_r] if grip_right is None else grip_right],
+            ]
+        )
+        return self.step(a)
+
+    def _physics_substeps(self) -> int:
+        """Physics steps for one control step, exact on average (250/freq)."""
+        self._substep_acc += self.PHYSICS_FREQ / self.control_freq
+        n = int(self._substep_acc)
+        self._substep_acc -= n
+        return n
+
+    def pace(self) -> float:
+        """Sleep to hold the wall-clock control rate (real_time mode).
+
+        Returns the overrun in seconds (0.0 if on schedule). If a step's
+        computation already exceeded control_dt, the schedule resets
+        instead of bursting to catch up.
+        """
+        import time
+
+        now = time.perf_counter()
+        if self._rt_next is None:
+            self._rt_next = now + self.control_dt
+            return 0.0
+        self._rt_next += self.control_dt
+        delay = self._rt_next - now
+        if delay > 0:
+            time.sleep(delay)
+            return 0.0
+        self.n_overruns += 1
+        self._rt_next = now + self.control_dt
+        return -delay
+
+    def step(self, action=None) -> float:
+        """Apply an action and advance one control step (1/control_freq s).
+
+        Args:
+            action: optional vector
+                [left_arm(n), left_gripper, right_arm(n), right_gripper],
+                n = arm joints per side (piper 6 -> 14-dim, franka 7 ->
+                16-dim), gripper values normalized to [0, 1]. `None` holds
+                the current drive targets.
+
+        The arm targets are INTERPOLATED across the tick's physics substeps
+        with a velocity feedforward (theta_d(k) = q0 + dtheta*k/N,
+        theta_dot_d = dtheta/dt) — the same (pos, vel) semantics the
+        nominal's cuRobo executor uses. Holding a single position target
+        with zero velocity across the tick realizes only ~kp/kd-damped
+        fraction of the command (~20% per 40 ms tick), which would make the
+        actor's and the nominal's actions different physical quantities.
+
+        Returns:
+            sim_time (seconds) after the step.
+        """
+        import numpy as np
+
+        interp = None
+        if action is not None:
+            action = np.asarray(action, dtype=np.float64).reshape(-1)
+            if action.shape[0] < 4 or action.shape[0] % 2 != 0:
+                raise ValueError(
+                    f"action must have 2n+2 dims [Ln, gripL, Rn, gripR], "
+                    f"got {action.shape}"
+                )
+            n = (action.shape[0] - 2) // 2
+            q0_l = np.array(self.robot.get_left_arm_real_jointState()[:n],
+                            dtype=np.float64)
+            q0_r = np.array(self.robot.get_right_arm_real_jointState()[:n],
+                            dtype=np.float64)
+            interp = (q0_l, action[0:n] - q0_l, q0_r,
+                      action[n + 1:n + 1 + n] - q0_r)
+            self.robot.set_gripper(float(action[n]), "left")
+            self.robot.set_gripper(float(action[2 * n + 1]), "right")
+        n = self._physics_substeps()
+        dt = n / self.PHYSICS_FREQ  # actual tick duration
+        for k in range(1, n + 1):
+            if interp is not None:
+                q0_l, d_l, q0_r, d_r = interp
+                self.robot.set_arm_joints(q0_l + d_l * (k / n), d_l / dt, "left")
+                self.robot.set_arm_joints(q0_r + d_r * (k / n), d_r / dt, "right")
+            self.task.scene.step()
+        self.task._update_render()
+        self.n_control_steps += 1
+        self.n_physics_steps += n
+        if self.real_time:
+            self.pace()
+        return self.sim_time
+
+    def settle_arms(self, n_steps: int = 400) -> None:
+        import numpy as np
+
+        # Aloha is a native bimanual/mobile articulation. Its RoboTwin
+        # homestate is already the task-ready pose; the mirrored arms cannot
+        # safely reuse a tabletop qpos from the separate-arm embodiments.
+        if self.embodiment == "aloha-agilex":
+            print(f"Keeping {self.embodiment} at RoboTwin homestate.")
+            return
+        if self.embodiment == "ur5-wsg":
+            print(f"Keeping {self.embodiment} at RoboTwin homestate.")
+            return
+        ready = TABLETOP_QPOS[self.embodiment]
+        left = np.asarray(ready["left"], dtype=np.float64)
+        right = np.asarray(ready["right"], dtype=np.float64)
+        self.robot.set_arm_joints(left, np.zeros_like(left), "left")
+        self.robot.set_arm_joints(right, np.zeros_like(right), "right")
+        for _ in range(n_steps):
+            self.task.scene.step()
+        self.task._update_render()
+        self.n_physics_steps += n_steps
+
+    def close(self) -> None:
+        try:
+            self.task.close_env(clear_cache=True)
+        except Exception as exc:
+            print(f"close_env warning: {exc}")
