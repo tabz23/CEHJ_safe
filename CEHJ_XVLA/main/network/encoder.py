@@ -7,9 +7,12 @@ Florence-2 VLM (encoder-only), giving:
   vlm_features [1, 100, 1024]   view-0 image tokens fused with text
   aux_visual   [1, 100, 1024]   views 1-2 image tokens
 
-We concatenate them -> [1, 200, 1024], run a LEARNED adapter down to the
-project's 256-d token width, and hand over tokens + zero positions (X-VLA
-carries no metric 3D — geometry-free baseline).
+We concatenate them -> [1, 200, 1024] (`encode_scene_features`, frozen —
+this is what the replay buffer stores) and run a LEARNED adapter down to
+the project's 256-d token width (`encode_scene` = features + adapter, used
+at rollout time; training applies the adapter to the stored raw tokens so
+its weights train). Positions are zeros (X-VLA carries no metric 3D —
+geometry-free baseline).
 
 Robot state: X-VLA's own proprio layout (EE6D per arm: xyz + rot6d + grip),
 20-dim, encoded by a small learned MLP to per-arm state tokens.
@@ -103,11 +106,13 @@ class XVLAEncoder(nn.Module):
         return self._input_ids
 
     @torch.no_grad()
-    def encode_scene(self, images_uint8: list[np.ndarray]):
-        """3 camera RGB uint8 frames -> (tokens [1, 200, out_dim], pos zeros).
+    def encode_scene_features(self, images_uint8: list[np.ndarray]):
+        """3 camera RGB uint8 frames -> PRE-adapter tokens [1, 200, 1024].
 
         images in X-VLA view order: [head, left_wrist, right_wrist] — view 0
-        is the text-fused one (the head camera).
+        is the text-fused one (the head camera). This is the frozen part;
+        the buffer stores THESE tokens so the adapter can train at train
+        time.
         """
         from PIL import Image
 
@@ -119,10 +124,19 @@ class XVLAEncoder(nn.Module):
             proc["image_input"].to(self._device),
             proc["image_mask"].to(self._device),
         )
-        feats = torch.cat(
+        return torch.cat(
             [out["vlm_features"], out["aux_visual_inputs"]], dim=1
         )                                     # [1, 200, 1024]
-        tokens = self.adapter(feats)          # [1, 200, out_dim]
+
+    def encode_scene(self, images_uint8: list[np.ndarray]):
+        """3 camera RGB uint8 frames -> (tokens [1, 200, out_dim], pos zeros).
+
+        Frozen features + the learned adapter. Inference path (rollout);
+        training applies the adapter to the stored raw tokens itself.
+        """
+        with torch.no_grad():
+            feats = self.encode_scene_features(images_uint8)
+            tokens = self.adapter(feats)      # [1, 200, out_dim]
         pos = torch.zeros(1, tokens.shape[1], 3, device=self._device)
         return tokens, pos
 

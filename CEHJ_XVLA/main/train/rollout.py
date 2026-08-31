@@ -22,16 +22,19 @@ R_delta = R_cur^T @ R_target (first two columns, row-major: the X-VLA
 client layout [R00,R01,R10,R11,R20,R21]). The gripper channel lives in
 X-VLA's 1-2g space (+1 = closed, -1 = open).
 
-Execution: delta -> absolute target (R_new = R_delta @ R_cur,
-p_new = p_cur + dxyz, grip thresholded X-VLA-style: 1-2*(g > 0.7)) ->
-task.take_action([left 8, right 8], action_type='ee'). Verified against
-RoboTwin envs/_base_task.py take_action: for action_type='ee' the arm block
-is 7 wide [x,y,z, qw,qx,qy,qz] (planner convention, t3d wxyz), gripper at
-index 7 / 15, clipped to [0,1] in Robot.set_gripper. NOTE: one take_action
-call plans a short cuRobo path and plays it out internally (its own
-scene.step loop), so an intervention tick spans as many physics steps as
-the path needs; per-tick capture still fires through the scene.step hook
-and intermediate ticks inherit the same commanded action.
+Execution: the EE6D delta becomes a per-tick JOINT displacement via the
+arm's geometric Jacobian at the live qpos (pytorch_kinematics SerialChain
+per arm on the same dual-arm URDF as the a_nom FK): Δx = [dxyz, axis-angle
+of R_delta] (6-dim EE twist, world frame), Δq_arm = J⁺ Δx with damped
+least squares (λ = 0.05) near singularities, then env.step_dtheta — the
+SAME per-tick velocity-feedforward stepping (10 physics substeps at 250 Hz)
+the parent's joint-space actor uses, so actor ticks, planner ticks, and
+perturbations all share the tick structure. The gripper delta passes
+through to a normalized [0,1] gripper target (1-2g channel: g_new =
+g_now − dgrip/2). NOTE: the measured-EE frame differs from the FK link
+frame by the constant calibration offset T_off — the Jacobian is computed
+at the FK link, so rotational deltas carry a small lever-arm error
+(~|T_off translation|); acceptable for the baseline.
 
 NOTE on quat conventions: X-VLA's own client.py round-trips through a
 scipy xyzw <-> t3d wxyz permutation that cancels between proprio encoding
@@ -47,7 +50,7 @@ Modes:
              nominal runs untouched and only commanded actions are recorded.
 
 Capture: a scene.step hook records h/obs at every control tick (all stepping
-paths — plan chunks, actor take_action ticks, perturbations — go through
+paths — plan chunks, actor step_dtheta ticks, perturbations — go through
 scene.step). The buffer's action is the COMMANDED EE6D delta per tick
 (planner a_nom, actor action, or the sampled perturbation), with
 action_source marking which.
@@ -132,6 +135,24 @@ def rot6d_to_mat(v6: np.ndarray) -> np.ndarray:
     return np.stack([b1, b2, b3], axis=-1)
 
 
+def mat_to_axis_angle(R: np.ndarray) -> np.ndarray:
+    """3x3 rotation -> axis-angle vector (axis * angle, radians)."""
+    angle = np.arccos(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))
+    if angle < 1e-9:
+        return np.zeros(3)
+    if np.pi - angle < 1e-4:
+        # near-180 deg: axis from the symmetric part of R + I
+        A = (R + np.eye(3)) / 2.0
+        axis = np.sqrt(np.clip(np.diag(A), 0.0, None))
+        axis *= np.sign(np.array([A[2, 1] - A[1, 2], A[0, 2] - A[2, 0],
+                                  A[1, 0] - A[0, 1]]) + 1e-12)
+        axis /= max(np.linalg.norm(axis), 1e-9)
+        return axis * angle
+    axis = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0],
+                     R[1, 0] - R[0, 1]]) / (2.0 * np.sin(angle))
+    return axis * angle
+
+
 def _ee_link_indices(kin) -> tuple[int, int]:
     """Flat FK-matrix indices of the two end links (last arm link per arm).
 
@@ -211,6 +232,32 @@ class RolloutController:
         self._ee_idx = _ee_link_indices(kin)
         self._T_base2world = self.env.compute_T_base2world(kin)
         self._T_off = self._calibrate_ee()
+
+        # per-arm geometric Jacobians for EE6D intervention execution:
+        # SerialChain from the shared base to each end link (verified:
+        # ndof == arm joints on all four URDF embodiments). aloha's
+        # DualArmKinematics chain is checked the same way.
+        import pytorch_kinematics as pk
+
+        if hasattr(kin, "arm_link_keys"):
+            ee_names = [k[-1] for k in kin.arm_link_keys]
+        else:
+            ee_names = [kin.left_arm_link_keys[-1], kin.right_arm_link_keys[-1]]
+        self._serial = []
+        q_left, q_right = self._arm_qpos()
+        self._n_arm = (len(q_left), len(q_right))
+        assert self._n_arm[0] == self._n_arm[1], \
+            f"asymmetric arms unsupported: {self._n_arm}"
+        for arm_i, ee_name in enumerate(ee_names):
+            sc = pk.SerialChain(kin.chain, ee_name)
+            n_dof = len(sc.get_joint_parameter_names())
+            assert n_dof == self._n_arm[arm_i], (
+                f"serial chain to {ee_name} has {n_dof} DOF, expected "
+                f"{self._n_arm[arm_i]} (mobile base / extra joints in the "
+                f"chain are unsupported)"
+            )
+            self._serial.append(sc)
+        self.dls_lambda = 0.05    # damped-least-squares lambda for J+
 
         self.flt = None
         self.filter_active = bool(filter_active)
@@ -341,37 +388,42 @@ class RolloutController:
         return a
 
     # ---------------- EE6D execution ----------------
-    def _execute_ee6d(self, action: np.ndarray) -> None:
-        """EE6D delta -> absolute target -> task.take_action(action_type='ee').
+    def _arm_jacobian(self, arm_i: int, q_arm: np.ndarray) -> np.ndarray:
+        """Geometric Jacobian [6, n_arm] of the arm's end link at q_arm,
+        world frame (pk computes it in the kin base frame; rows are
+        [linear; angular])."""
+        q = torch.as_tensor(q_arm, dtype=torch.float32)[None]
+        J = self._serial[arm_i].jacobian(q)[0].double().numpy()  # [6, n]
+        R = self._T_base2world[:3, :3]
+        return np.block([[R @ J[:3]], [R @ J[3:]]])
 
-        take_action layout (verified at RoboTwin envs/_base_task.py
-        take_action, action_type='ee'): 16 dims =
-        [left xyz(3) + quat(4), left_grip, right xyz(3) + quat(4),
-        right_grip]; the quat goes straight into the planner (t3d wxyz);
-        gripper values are clipped to [0,1] in Robot.set_gripper. The
-        gripper command follows X-VLA's client: 1 - 2*(g > 0.7) on the
-        absolute 1-2g target.
+    def _execute_ee6d(self, action: np.ndarray) -> None:
+        """EE6D delta -> per-tick joint displacement -> env.step_dtheta.
+
+        Per arm: Δx = [dxyz, axis-angle(R_delta)] (world frame), Δq = J⁺ Δx
+        with damped least squares (λ = dls_lambda) so near-singular J stays
+        bounded. The gripper delta passes through to a normalized [0,1]
+        target (g_new = g_now − dgrip/2 in the 1-2g channel). step_dtheta
+        runs the same 10-substep velocity-feedforward tick the parent's
+        joint-space actor uses — actor ticks share the planner's tick
+        structure exactly.
         """
-        obs = self._ee_state()
-        out = np.zeros(16, dtype=np.float64)
-        for arm_i in range(2):
+        state = self._ee_state()
+        q_left, q_right = self._arm_qpos()
+        dq = np.zeros(self._n_arm[0] + self._n_arm[1], dtype=np.float64)
+        grips = []
+        for arm_i, q_arm in enumerate((q_left, q_right)):
             d = action[arm_i * 10: (arm_i + 1) * 10]
-            ee = obs["ee_poses"][arm_i]
-            R_new = rot6d_to_mat(d[3:9]) @ quat_wxyz_to_mat(ee[3:])
-            p_new = ee[:3] + d[:3]
-            q_new = mat_to_quat_wxyz(R_new)
-            g_cur = 1.0 - 2.0 * obs["grippers"][arm_i]
-            g_cmd = 1.0 - 2.0 * (g_cur + d[9] > 0.7)
-            out[arm_i * 8: arm_i * 8 + 3] = p_new
-            out[arm_i * 8 + 3: arm_i * 8 + 7] = q_new
-            out[arm_i * 8 + 7] = g_cmd
-        task = self.env.task
-        # take_action sets eval_success=True (and then no-ops forever) if the
-        # success check trips inside an intervention — keep the actor live
-        # for the rest of the episode; run() does the final check itself
-        prev_success = getattr(task, "eval_success", False)
-        task.take_action(out, action_type="ee")
-        task.eval_success = prev_success
+            dx = np.concatenate([d[:3], mat_to_axis_angle(rot6d_to_mat(d[3:9]))])
+            J = self._arm_jacobian(arm_i, q_arm)
+            n = self._n_arm[arm_i]
+            lam2 = self.dls_lambda ** 2
+            dq_arm = J.T @ np.linalg.solve(J @ J.T + lam2 * np.eye(6), dx)
+            dq[arm_i * n: (arm_i + 1) * n] = dq_arm
+            # 1-2g channel: g01_new = g01_now - dgrip/2, clipped to [0, 1]
+            grips.append(float(np.clip(state["grippers"][arm_i] - d[9] / 2.0,
+                                       0.0, 1.0)))
+        self.env.step_dtheta(dq, grip_left=grips[0], grip_right=grips[1])
 
     # ---------------- per-tick hook ----------------
     def _tick_hook(self, ctx) -> bool:
@@ -461,7 +513,8 @@ class RolloutController:
         if self.mode == "collect" and self.buf is not None:
             self._collect_tick(obs, h, encoded)
         if self.flt is not None and self.filter_active:
-            self._obs_cache = (self._n_physics, encoded)
+            # cache the policy encoding (enc namespace), not the raw tuple
+            self._obs_cache = (self._n_physics, encoded[2])
         else:
             self._obs_cache = None
         if self.video is not None and t_now >= self._next_frame_t - 1e-9:
@@ -511,9 +564,9 @@ class RolloutController:
         COMMANDED EE6D action of the tick that led here (planner a_nom,
         actor action, or sampled perturbation — action_source marks which)
         and written to the buffer."""
-        tokens, proprio, _arm_tokens = encoded
+        feats, proprio, _arm_tokens = encoded
         entry = {
-            "scene_tokens": tokens[0].cpu().half().numpy(),   # [200, 256]
+            "scene_tokens": feats[0].cpu().half().numpy(),    # [200, 1024]
             "proprio": proprio.astype(np.float32),            # [20]
             "embodiment_id": np.int8(EMBODIMENT_IDS[self.cfg.embodiment]),
             "task_id": np.int8(
@@ -571,20 +624,23 @@ class RolloutController:
         return self._encode_obs(self.env.get_xvla_obs())
 
     def _encode_obs(self, obs):
-        """obs -> (scene_tokens [1,200,D], proprio np [20], enc namespace)
-        — the frozen X-VLA encoder plus the learned proprio adapter. Runs
-        ONCE per tick; the buffer write and the policy encoding both consume
-        this (see _capture_tick)."""
+        """obs -> (scene_raw [1,200,1024], proprio np [20], enc namespace)
+        — the frozen X-VLA VLM features, the raw proprio, and the policy
+        encoding (learned adapter + proprio_enc applied). Runs ONCE per
+        tick; the buffer stores the RAW features/proprio (adapter and
+        proprio_enc train at train time), the filter consumes the adapted
+        tokens (see _capture_tick)."""
         with torch.no_grad():
-            tokens, _pos = self.encoder.encode_scene(obs["images"])
+            feats = self.encoder.encode_scene_features(obs["images"])
+            scene = self.encoder.adapter(feats)               # [1, 200, 256]
             proprio = self._proprio(obs)
             arm_tokens = self.encoder.encode_proprio(
                 torch.from_numpy(proprio.astype(np.float32))[None]
             )
         enc = SimpleNamespace(
-            arm_tokens=arm_tokens, scene=tokens, scene_mask=None
+            arm_tokens=arm_tokens, scene=scene, scene_mask=None
         )
-        return tokens, proprio, enc
+        return feats, proprio, enc
 
     # ---------------- main loop ----------------
     def run(self, max_steps: int | None = None):

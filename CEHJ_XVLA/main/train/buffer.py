@@ -1,13 +1,14 @@
 """Flat per-step memmap replay buffer for the X-VLA EE6D HJ-SAC baseline.
 
-Slim EE6D schema (~100 KB/step, dominated by fp16 scene tokens). Stored per
-step: scene_tokens [200, 256] fp16 (post-adapter X-VLA VLM tokens — the
-adapter is FROZEN so stored tokens never go stale), proprio [20] (X-VLA
-EE6D layout: per arm [xyz, rot6d, grip] with grip = 1-2g), action [20]
-(the COMMANDED EE6D delta of the tick that led to the NEXT state — planner
-a_nom / actor / perturbation, see action_source), h, embodiment_id,
-task_id, episode_id, done. No contact fields, no Jacobians, no padding —
-EE6D is embodiment-agnostic.
+Slim EE6D schema (~400 KB/step, dominated by fp16 scene tokens). Stored per
+step: scene_tokens [200, 1024] fp16 (PRE-adapter frozen X-VLA VLM tokens —
+the adapter and proprio encoder train at train time, like the parent's
+injection/trunk), proprio [20] (raw X-VLA EE6D layout: per arm
+[xyz, rot6d, grip] with grip = 1-2g), action [20] (the COMMANDED EE6D delta
+of the tick that led to the NEXT state — planner a_nom / actor /
+perturbation, see action_source), h, embodiment_id, task_id, episode_id,
+done. No contact fields, no Jacobians, no padding — EE6D is
+embodiment-agnostic.
 
 Header (JSON, once): config dict incl. h_scale, softmin_T, dt, the
 task/embodiment/obstacle choice lists, field shapes — without these the
@@ -28,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 SCENE_TOKENS = 200
-TOKEN_DIM = 256
+TOKEN_DIM = 1024  # pre-adapter X-VLA feature width
 N_ACTION = 20  # EE6D x 2 arms
 
 # name -> (dtype, per-step shape)

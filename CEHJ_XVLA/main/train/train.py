@@ -18,12 +18,11 @@ safer, so a soft target would make the value function optimistic about
 safety — the dangerous direction for an avoid problem. logp_n is computed
 for logging and intentionally unused in the target.
 
-Representation: the buffer stores POST-adapter X-VLA scene tokens
-([200, 256] fp16) and raw EE6D proprio [20]. The adapter is therefore
-FROZEN during training (its 1024-d inputs are not stored — a fixed random
-projection of the frozen VLM features); the proprio encoder, the actor /
-critic trunks and the heads train, with a Polyak target copy of the
-proprio encoder alongside the target critics.
+Representation: the buffer stores PRE-adapter X-VLA scene tokens
+([200, 1024] fp16) and raw EE6D proprio [20]; the adapter and proprio
+encoder run INSIDE grad_step (like the parent's injection/trunk), with
+Polyak target copies alongside the target critics. Policy side everywhere:
+scene = adapter(scene_raw), arm_tokens = proprio_enc(proprio).
 
 Usage (from CEHJ_XVLA/):
     python main/train/train.py --data data/smoke --grad-steps 300 --eval-every 150
@@ -124,12 +123,10 @@ class Trainer:
             print(f"buffer: {len(self.buf)} steps")
 
         # the X-VLA encoder doubles as the collection/eval encoder AND the
-        # home of the learned proprio adapter (the VLM itself is frozen;
-        # the 1024->256 scene adapter is frozen too — the buffer stores
-        # post-adapter tokens, so training it would stale the data)
+        # home of the learned adapter / proprio encoder (the VLM itself is
+        # frozen; adapter + proprio_enc train here and are used by the
+        # rollout through this same object)
         self.encoder = XVLAEncoder(str(cfg.xvla_ckpt), device="cuda")
-        for p in self.encoder.adapter.parameters():
-            p.requires_grad_(False)
         self.actor = EE6DActor().cuda()
         # V lives in h*h_scale units; T is physical metres in the config, so
         # scale it to keep the softmin sharpness physically meaningful
@@ -137,18 +134,21 @@ class Trainer:
         self.critics = EE6DTwinCritic(temperature=T).cuda()
         self.critics_targ = EE6DTwinCritic(temperature=T).cuda()
         self.critics_targ.load_state_dict(self.critics.state_dict())
-        # target PROPRIO ENCODER too: Polyak covers nothing if the target's
-        # arm tokens come from the live encoder — the bootstrap target would
-        # move every step
+        # target ENCODERS too: Polyak covers nothing if the target's tokens
+        # come from the live adapter/proprio_enc — the bootstrap target
+        # would move every step
         import copy as _copy
 
+        self.adapter_targ = _copy.deepcopy(self.encoder.adapter)
         self.proprio_enc_targ = _copy.deepcopy(self.encoder.proprio_enc)
         self.target_params = (
             list(self.critics_targ.parameters())
+            + list(self.adapter_targ.parameters())
             + list(self.proprio_enc_targ.parameters())
         )
         self.live_params = (
             list(self.critics.parameters())
+            + list(self.encoder.adapter.parameters())
             + list(self.encoder.proprio_enc.parameters())
         )
         for p in self.target_params:
@@ -157,7 +157,8 @@ class Trainer:
         self.opt_c = torch.optim.Adam(self.critics.parameters(), lr=cfg.lr)
         self.opt_a = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr)
         self.opt_e = torch.optim.Adam(
-            self.encoder.proprio_enc.parameters(), lr=cfg.lr
+            list(self.encoder.adapter.parameters())
+            + list(self.encoder.proprio_enc.parameters()), lr=cfg.lr
         )
 
         self.rng = np.random.RandomState(0)
@@ -181,12 +182,14 @@ class Trainer:
         return sm[None].expand(batch, N_ACTION)
 
     def _encode(self, b: dict, suffix: str = "", target: bool = False):
-        scene = _t(b["scene_tokens" + suffix])              # [B, 200, 256]
+        scene_raw = _t(b["scene_tokens" + suffix])          # [B, 200, 1024]
         proprio = _t(b["proprio" + suffix])                 # [B, 20]
         if target:
+            scene = self.adapter_targ(scene_raw)            # [B, 200, 256]
             arm = self.proprio_enc_targ(
                 proprio.view(-1, 2, N_ACTION // 2))
         else:
+            scene = self.encoder.adapter(scene_raw)
             arm = self.encoder.encode_proprio(proprio)      # [B, 2, 256]
         return arm, scene, None
 
@@ -215,32 +218,37 @@ class Trainer:
         loss_q.backward()
         gn_c = torch.nn.utils.clip_grad_norm_(self.critics.parameters(), 10.0)
         gn_e = torch.nn.utils.clip_grad_norm_(
-            list(self.encoder.proprio_enc.parameters()), 10.0
+            list(self.encoder.adapter.parameters())
+            + list(self.encoder.proprio_enc.parameters()), 10.0
         )
         self.opt_c.step()
         self.opt_e.step()
 
-        # actor update (proprio encoder/critics frozen for this step;
+        # actor update (adapter/proprio_enc/critics frozen for this step;
         # arm/scene detached — the critic-loss backward already consumed
-        # its graph; scene is a stored constant with no graph anyway)
-        for p in self.encoder.proprio_enc.parameters():
+        # its graph)
+        for p in (list(self.encoder.adapter.parameters())
+                  + list(self.encoder.proprio_enc.parameters())):
             p.requires_grad_(False)
         for p in self.critics.parameters():
             p.requires_grad_(False)
-        a_pi, logp = self.actor(arm.detach(), scene, scene_mask, step_max)
+        a_pi, logp = self.actor(arm.detach(), scene.detach(), scene_mask,
+                                step_max)
         q1_pi, q2_pi, _, _ = self.critics(
-            arm.detach(), scene, scene_mask, a_pi)
+            arm.detach(), scene.detach(), scene_mask, a_pi)
         loss_pi = (-torch.minimum(q1_pi, q2_pi) + alpha * logp).mean()
         self.opt_a.zero_grad(set_to_none=True)
         loss_pi.backward()
         gn_a = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 10.0)
         self.opt_a.step()
-        for p in self.encoder.proprio_enc.parameters():
+        for p in (list(self.encoder.adapter.parameters())
+                  + list(self.encoder.proprio_enc.parameters())):
             p.requires_grad_(True)
         for p in self.critics.parameters():
             p.requires_grad_(True)
 
-        # Polyak target update — critic heads AND the target proprio encoder
+        # Polyak target update — critic heads AND the target encoders
+        # (adapter + proprio_enc)
         with torch.no_grad():
             for tp, sp in zip(self.target_params, self.live_params):
                 tp.mul_(1 - cfg.tau).add_(cfg.tau * sp)
@@ -255,15 +263,15 @@ class Trainer:
             "mean_gap_h_q": float((h - qmin).mean()),
             "entropy": float(-logp.mean()),
             "gn_critic": float(gn_c), "gn_actor": float(gn_a),
-            "gn_proprio": float(gn_e),
+            "gn_encoder": float(gn_e),
             "buffer": len(self.buf),
         }
         # mode-collapse diagnostics (does the actor output the same action
         # everywhere?): diversity of the deterministic action across states,
         # and how hard it leans on the tanh bound
         with torch.no_grad():
-            a_det, _ = self.actor(arm.detach(), scene, scene_mask, step_max,
-                                  deterministic=True)
+            a_det, _ = self.actor(arm.detach(), scene.detach(), scene_mask,
+                                  step_max, deterministic=True)
             out["actor/action_std"] = float(a_det.std(dim=0).mean())
             out["actor/sat_frac"] = float(
                 ((a_det.abs() / step_max.clamp_min(1e-9)) > 0.95
@@ -450,6 +458,7 @@ class Trainer:
         self.actor.load_state_dict(ckpt["actor"])
         self.critics.load_state_dict(ckpt["critics"])
         self.critics_targ.load_state_dict(self.critics.state_dict())
+        self.adapter_targ.load_state_dict(self.encoder.adapter.state_dict())
         self.proprio_enc_targ.load_state_dict(
             self.encoder.proprio_enc.state_dict())
         print(f"loaded checkpoint {path}")
