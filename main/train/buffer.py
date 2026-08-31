@@ -210,6 +210,10 @@ class StepBuffer:
         suffices). Ring-aware: pairs crossing the write head (where the
         oldest slot meets the newest) are excluded."""
         if self._valid_t is None:
+            if "episode_id" not in self.arrays or self.n == 0:
+                # fresh buffer: arrays are created lazily on first append
+                self._valid_t = np.zeros(0, dtype=np.int64)
+                return self._valid_t
             wrapped = self.n == self.capacity
             hi = self.capacity if wrapped else self.n
             ep = self.arrays["episode_id"][:hi]

@@ -108,7 +108,10 @@ class Trainer:
         if 0 < len(allowed) < len(EMBODIMENT_IDS):
             self.buf.set_embodiment_filter(allowed)
             n_valid = len(self.buf._valid_transitions())
-            if n_valid == 0:
+            if len(self.buf) > 0 and n_valid == 0:
+                # an empty buffer is fine (from-scratch run fills it);
+                # a NON-empty buffer with zero matches means the filter
+                # excluded everything — that's the real error
                 raise RuntimeError(
                     f"embodiment filter {sorted(allowed)} leaves no "
                     f"transitions in {buf_dir}"
