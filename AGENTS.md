@@ -217,7 +217,9 @@ q/precision-recall, actor/action_std, and the videos for the filter engaging.
 - wandb calls must stay wrapped in _safe_wandb_log (CommError killed a run).
 - Checkpoints publish atomically (tmp + os.replace); the --follow collector
   tolerates load failures.
-- git push: ghfast.top is read-only; push direct to github.com with the token.
+- git push: ghfast.top is read-only; push direct to github.com with the
+  token. If direct times out, use the AutoDL turbo proxy:
+  `https_proxy=http://10.37.1.23:12798 git push ...`
 - Never commit `data/` (memmaps) or `wandb/` — gitignored.
 
 ## Quick checks
