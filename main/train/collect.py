@@ -341,17 +341,25 @@ def collect(cfg: FrozenConfig, out_root: Path, buf: StepBuffer | None = None,
                 models is not None
                 and rng.rand() < cfg.filter_episode_frac
             )
-            candidate = RolloutController(
-                cfg_ep, seed=episode_offset + attempt, mode="collect",
-                encoder=encoder, kin=kins[cfg_ep.embodiment],
-                policy_enc=models[0] if models else None,
-                actor=models[1] if models else None,
-                critics=models[2] if models else None,
-                filter_active=use_filter,
-                buf=buf, episode_id=episode_offset + attempt,
-                perturb_prob=cfg_ep.perturb_prob, rng=rng,
-                max_steps=int(cfg_ep.max_steps_per_episode * 250.0 / 25.0),
-            )
+            try:
+                candidate = RolloutController(
+                    cfg_ep, seed=episode_offset + attempt, mode="collect",
+                    encoder=encoder, kin=kins[cfg_ep.embodiment],
+                    policy_enc=models[0] if models else None,
+                    actor=models[1] if models else None,
+                    critics=models[2] if models else None,
+                    filter_active=use_filter,
+                    buf=buf, episode_id=episode_offset + attempt,
+                    perturb_prob=cfg_ep.perturb_prob, rng=rng,
+                    max_steps=int(cfg_ep.max_steps_per_episode * 250.0 / 25.0),
+                )
+            except Exception as exc:
+                # scene setup itself can fail (bad seed: unstable object
+                # spawn, grasp planner edge cases) — treat as a re-draw
+                print(f"[collect] ep {ep}: env setup failed ({exc}); "
+                      f"re-drawing")
+                attempt += 1
+                continue
             if candidate.env.obstacle is not None:
                 ro = candidate
                 break
