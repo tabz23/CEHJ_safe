@@ -549,7 +549,15 @@ def main() -> None:
         )
         eff_buf = (Path(args.buffer_dir).resolve() if args.buffer_dir
                    else args.run / "buffer")
-        warmup_exists = (eff_buf / "header.json").exists()
+        # warmup exists only with actual DATA — a previous crashed attempt
+        # leaves header.json with n=0 and would skip collection forever
+        _hdr = eff_buf / "header.json"
+        warmup_exists = False
+        if _hdr.exists():
+            try:
+                warmup_exists = int(json.loads(_hdr.read_text()).get("n", 0)) > 0
+            except Exception:
+                warmup_exists = False
         n_warm = 0 if warmup_exists else args.warmup_episodes
         n_collects = args.collect_rounds + (0 if warmup_exists else 1)
         capacity = ((n_warm + n_collects * n_ep)
