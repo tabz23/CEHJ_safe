@@ -79,14 +79,15 @@ python main/train/train.py --collect-rounds 10 --episodes-per-round 3 \
 ## Standard training (production defaults)
 
 ```
-python main/train/train.py --collect-rounds 40 --grad-steps-per-round 1024 \
-    --eval-every 1024 --leave-out franka-panda \
-    --init-from <ckpt> --buffer-dir <local>/buffer \
+python main/train/train.py --collect-rounds 100 --episodes-per-round 3 \
+    --grad-steps-per-round 2048 --eval-every 2048 --leave-out franka-panda \
+    --init-buffer <warmup>/buffer --buffer-dir <local>/buffer \
     --data <data_dir> --run <run_dir>
 ```
 
-40 rounds x 1024 grad steps, full 5x4 (pool) episode product per round,
-cross-eval on the held-out embodiment every 10 epochs.
+100 epochs x 2048 grad steps (= 204,800 total), 3 collected episodes per
+epoch, cross-eval on the held-out embodiment every 10 epochs. Preceded by a
+250-episode success-only warmup (full pool) into the same --buffer-dir.
 
 ## Ablations
 
