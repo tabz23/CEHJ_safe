@@ -102,16 +102,18 @@ class CriticHead(nn.Module):
 
     def __init__(self, dim: int = 256, n_actions: int = 16, depth: int = 2,
                  temperature: float = 0.02, post_action_geometry: bool = True,
-                 debug: bool = False):
+                 debug: bool = False, geo: bool = True):
         super().__init__()
         self.n_actions = n_actions
         self.temperature = temperature
-        self.post_action_geometry = post_action_geometry
+        # post-action bias requires the geometric attention; ablating the
+        # trunk's geometry forces it off
+        self.post_action_geometry = post_action_geometry and geo
         self.debug = debug
         self._layout_cache: dict = {}
         self.act_proj = nn.Linear(8, dim)
         self.blocks = nn.ModuleList(
-            [TrunkBlock(dim) for _ in range(depth)]
+            [TrunkBlock(dim, geo=geo) for _ in range(depth)]
         )
         self.value_head = nn.Sequential(
             nn.Linear(dim, dim),
@@ -202,12 +204,12 @@ class TwinCritic(nn.Module):
 
     def __init__(self, dim: int = 256, n_actions: int = 16, depth: int = 2,
                  temperature: float = 0.02, post_action_geometry: bool = True,
-                 debug: bool = False):
+                 debug: bool = False, geo: bool = True):
         super().__init__()
         self.c1 = CriticHead(dim, n_actions, depth, temperature,
-                             post_action_geometry, debug)
+                             post_action_geometry, debug, geo=geo)
         self.c2 = CriticHead(dim, n_actions, depth, temperature,
-                             post_action_geometry, debug)
+                             post_action_geometry, debug, geo=geo)
 
     def forward(self, enc: Encoded, dtheta, Jlin, Jang, joint_index):
         q1, v1 = self.c1(enc, dtheta, Jlin, Jang, joint_index)

@@ -117,15 +117,17 @@ class Trainer:
             print(f"buffer: {len(self.buf)} steps")
         print(f"buffer: {len(self.buf)} steps")
 
-        self.injection = RobotInjection().cuda()
-        self.trunk = GeometricTrunk().cuda()
+        geo = not cfg.ablate_geometry
+        self.injection = RobotInjection(
+            use_body_features=not cfg.ablate_injection).cuda()
+        self.trunk = GeometricTrunk(geo=geo).cuda()
         self.policy_enc = PolicyEncoder(self.injection, self.trunk).cuda()
         self.actor = TokenActor().cuda()
         # V lives in h*h_scale units; T is physical metres in the config, so
         # scale it to keep the softmin sharpness physically meaningful
         T = cfg.softmin_T * float(getattr(cfg, "h_scale", 1.0))
-        self.critics = TwinCritic(temperature=T).cuda()
-        self.critics_targ = TwinCritic(temperature=T).cuda()
+        self.critics = TwinCritic(temperature=T, geo=geo).cuda()
+        self.critics_targ = TwinCritic(temperature=T, geo=geo).cuda()
         self.critics_targ.load_state_dict(self.critics.state_dict())
         # target ENCODER too: Polyak covers nothing if enc_n comes from the
         # live trunk/injection — the bootstrap target would move every step
@@ -477,6 +479,13 @@ def main() -> None:
                    help="per DAgger round; 0 = len(tasks) x len(embodiments) "
                         "so every round covers the full product")
     p.add_argument("--grad-steps-per-round", type=int, default=1024)
+    p.add_argument("--ablate-geometry", action="store_true",
+                   help="no (dist,dir) attention bias / direction channel")
+    p.add_argument("--ablate-injection", action="store_true",
+                   help="no analytic body-feature injection")
+    p.add_argument("--vanilla", action="store_true",
+                   help="both ablations: plain cross-attention over frozen "
+                        "HoloBrain state + scene tokens")
     p.add_argument("--no-wandb", action="store_true")
     p.add_argument("--leave-out", default=None,
                    help="leave-one-out phase 1: exclude this embodiment")
@@ -506,6 +515,9 @@ def main() -> None:
             print(f"[train] wandb.init failed ({exc}); continuing offline")
             run = None
 
+    if args.vanilla:
+        args.ablate_geometry = args.ablate_injection = True
+
     if args.collect_rounds > 0:
         # DAgger loop: train on the current buffer, then collect the next
         # round with the UPDATED weights (filter episodes per
@@ -521,6 +533,8 @@ def main() -> None:
         cfg = FrozenConfig()
         cfg.eval_every = args.eval_every
         cfg.eval_sweep_every_epochs = args.eval_sweep_every_epochs
+        cfg.ablate_geometry = args.ablate_geometry
+        cfg.ablate_injection = args.ablate_injection
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
         n_ep = args.episodes_per_round or (
             len(cfg.task_choices) * len(cfg.embodiment_choices)
@@ -614,6 +628,8 @@ def main() -> None:
         cfg.grad_steps = args.grad_steps
         cfg.eval_every = args.eval_every
         cfg.eval_sweep_every_epochs = args.eval_sweep_every_epochs
+        cfg.ablate_geometry = args.ablate_geometry
+        cfg.ablate_injection = args.ablate_injection
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
         if run is not None:
             run.config.update(cfg.to_dict())

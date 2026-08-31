@@ -52,23 +52,27 @@ class GeoCrossAttention(nn.Module):
     """
 
     def __init__(self, dim: int = 256, heads: int = 8, bias_hidden: int = 32,
-                 dir_per_head: bool = True):
+                 dir_per_head: bool = True, geo: bool = True):
         super().__init__()
         self.heads = heads
         self.dh = dim // heads
         self.dir_per_head = dir_per_head
+        self.geo = geo  # False = plain cross-attention (ablation)
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
-        # per-head additive logit from (log dist, dir) — "physically nearby
-        # matters" as initialization rather than something RL must discover
-        self.bias_mlp = nn.Sequential(
-            nn.Linear(4, bias_hidden),
-            nn.SiLU(),
-            nn.Linear(bias_hidden, heads),
-        )
+        if geo:
+            # per-head additive logit from (log dist, dir) — "physically
+            # nearby matters" as initialization rather than something RL
+            # must discover
+            self.bias_mlp = nn.Sequential(
+                nn.Linear(4, bias_hidden),
+                nn.SiLU(),
+                nn.Linear(bias_hidden, heads),
+            )
         # value aggregate + attention-weighted direction
-        self.out_proj = nn.Linear(dim + (3 * heads if dir_per_head else 3), dim)
+        out_in = dim + ((3 * heads if dir_per_head else 3) if geo else 0)
+        self.out_proj = nn.Linear(out_in, dim)
 
     def forward(self, body, pos, scene, scene_pos, scene_mask):
         B, N, C = body.shape
@@ -82,13 +86,14 @@ class GeoCrossAttention(nn.Module):
         # pair grid, METRES. 1 mm floor bounds |dir| <= 1 and keeps
         # log dist sane for near-coincident tokens (arm in view of a scene
         # token) — physically meaningless, numerically essential.
-        rel = scene_pos[:, None, :, :] - pos[:, :, None, :]            # B,N,M,3
-        dist = rel.norm(dim=-1, keepdim=True).clamp_min(1e-3)          # B,N,M,1
-        dir_ = rel / dist
-        bias_in = torch.cat([dist.log(), dir_], dim=-1)
-        logit_bias = self.bias_mlp(bias_in).permute(0, 3, 1, 2)        # B,H,N,M
-
-        logits = (q @ k.transpose(-1, -2)) * self.dh**-0.5 + logit_bias
+        logits = (q @ k.transpose(-1, -2)) * self.dh**-0.5
+        if self.geo:
+            rel = scene_pos[:, None, :, :] - pos[:, :, None, :]        # B,N,M,3
+            dist = rel.norm(dim=-1, keepdim=True).clamp_min(1e-3)      # B,N,M,1
+            dir_ = rel / dist
+            bias_in = torch.cat([dist.log(), dir_], dim=-1)
+            logit_bias = self.bias_mlp(bias_in).permute(0, 3, 1, 2)    # B,H,N,M
+            logits = logits + logit_bias
         if scene_mask is not None:
             # scene validity only; finfo.min is fp16-safe (never overflows
             # to -inf) and still softmaxes to exactly 0
@@ -99,6 +104,8 @@ class GeoCrossAttention(nn.Module):
         A = logits.softmax(dim=-1)                                     # B,H,N,M
 
         val = (A @ v).transpose(1, 2).reshape(B, N, C)                 # B,N,C
+        if not self.geo:
+            return self.out_proj(val)
         direction = torch.einsum("bhnm,bnmc->bhnc", A, dir_)           # B,H,N,3
         if self.dir_per_head:
             direction = direction.transpose(1, 2).reshape(B, N, H * 3)
@@ -111,10 +118,11 @@ class TrunkBlock(nn.Module):
     """cross_attn -> self_attn -> ffn, each pre-norm residual."""
 
     def __init__(self, dim: int = 256, heads: int = 8, ffn_dim: int = 1024,
-                 dir_per_head: bool = True):
+                 dir_per_head: bool = True, geo: bool = True):
         super().__init__()
         self.norm_cross = nn.RMSNorm(dim)
-        self.cross = GeoCrossAttention(dim, heads, dir_per_head=dir_per_head)
+        self.cross = GeoCrossAttention(dim, heads, dir_per_head=dir_per_head,
+                                       geo=geo)
         self.norm_self = nn.RMSNorm(dim)
         self.self_attn = nn.MultiheadAttention(dim, heads, batch_first=True)
         self.norm_ffn = nn.RMSNorm(dim)
@@ -148,10 +156,11 @@ class GeometricTrunk(nn.Module):
     """
 
     def __init__(self, dim: int = 256, heads: int = 8, depth: int = 3,
-                 dir_per_head: bool = True):
+                 dir_per_head: bool = True, geo: bool = True):
         super().__init__()
         self.blocks = nn.ModuleList(
-            [TrunkBlock(dim, heads, dir_per_head=dir_per_head) for _ in range(depth)]
+            [TrunkBlock(dim, heads, dir_per_head=dir_per_head, geo=geo)
+             for _ in range(depth)]
         )
 
     def forward(self, body, pos, mask, scene, scene_pos, scene_mask):

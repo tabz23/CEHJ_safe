@@ -87,16 +87,21 @@ class RobotInjection(nn.Module):
         mask [B, M+2]       bool; residuals are always valid
     """
 
-    def __init__(self, state_dim: int = 256, body_dim: int = 16, n_residual: int = 2):
+    def __init__(self, state_dim: int = 256, body_dim: int = 16, n_residual: int = 2,
+                 use_body_features: bool = True):
         super().__init__()
         self.n_residual = n_residual
+        # False = vanilla baseline: body tokens are the frozen HoloBrain
+        # state tokens alone, no analytic feature columns injected
+        self.use_body_features = use_body_features
         # Step 1: scale the frozen tokens to the analytic columns' ~unit range
         self.norm_state = nn.RMSNorm(state_dim)
         # Step 2: shared per-token projection (count-invariant across
         # embodiments — no per-joint parameters). Nonlinear because the
         # useful quantities are products (velocity x orientation), not sums.
+        in_dim = state_dim + (body_dim if use_body_features else 0)
         self.proj = nn.Sequential(
-            nn.Linear(state_dim + body_dim, state_dim),
+            nn.Linear(in_dim, state_dim),
             nn.SiLU(),
             nn.Linear(state_dim, state_dim),
         )
@@ -138,7 +143,10 @@ class RobotInjection(nn.Module):
         s = s * state_valid.unsqueeze(-1).to(s.dtype)
 
         # Step 2 — project to model width, shared weights per token
-        x = torch.cat([s, body_tokens.to(s.dtype)], dim=-1)
+        if self.use_body_features:
+            x = torch.cat([s, body_tokens.to(s.dtype)], dim=-1)
+        else:
+            x = s                             # vanilla: frozen tokens only
         h = self.norm_out(self.proj(x))       # [B, M, 256]
 
         # Step 3 — residual tokens anchored at gripper positions, indexed by

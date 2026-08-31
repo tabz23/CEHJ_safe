@@ -82,6 +82,11 @@ class FrozenConfig:
     # (predicted penetration), release as soon as Q >= 0. No margin, no
     # hysteresis band — the hj_hold_ticks block provides the commitment.
     filter_margin: float = 0.0
+    # ablations: vanilla = both off-features disabled — plain cross-attention
+    # over frozen HoloBrain state + scene tokens, same actor/critic heads
+    ablate_geometry: bool = False   # no (dist, dir) attention bias / direction
+                                    # channel in trunk or critic blocks
+    ablate_injection: bool = False  # no analytic body-feature columns injected
     contact_force_threshold: float = 20.0  # N; collision reporting:
                                         # measured grazes in sim are >= 79 N
                                         # (stiff PD drive), non-contact is 0

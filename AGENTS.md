@@ -76,6 +76,16 @@ python main/train/train.py --collect-rounds 10 --episodes-per-round 3 \
   process + trainer, checkpoint-follow). Faster wall-clock (collection hides
   behind training); round mode is the debuggable default.
 
+## Ablations
+
+`--ablate-geometry` — no (log-dist, direction) attention bias and no
+attention-weighted direction channel, in the trunk AND the critic's late
+blocks (post_action_geometry follows automatically). `--ablate-injection` —
+body tokens are the frozen HoloBrain state tokens alone, no analytic
+feature columns. `--vanilla` = both: plain cross-attention over frozen
+state + scene tokens with the SAME actor/critic heads (the baseline).
+Ablated runs need their own checkpoints — logit shapes differ.
+
 ## Cross-validation (LOO and leave-4-out)
 
 ONE shared warmup buffer for everything — collect the full 5x5 pool once,

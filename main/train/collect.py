@@ -203,12 +203,15 @@ def _load_follow_models(ckpt_path: Path, built: dict | None = None,
         # not part of the state_dict, so loading cannot fix a wrong value
         T = (float(cfg.softmin_T) * float(getattr(cfg, "h_scale", 1.0))
              if cfg is not None else 0.02)
-        injection = RobotInjection().cuda().eval()
-        trunk = GeometricTrunk().cuda().eval()
+        geo = not getattr(cfg, "ablate_geometry", False)
+        injection = RobotInjection(
+            use_body_features=not getattr(cfg, "ablate_injection", False)
+        ).cuda().eval()
+        trunk = GeometricTrunk(geo=geo).cuda().eval()
         built = {
             "policy_enc": PolicyEncoder(injection, trunk).cuda().eval(),
             "actor": TokenActor().cuda().eval(),
-            "critics": TwinCritic(temperature=T).cuda().eval(),
+            "critics": TwinCritic(temperature=T, geo=geo).cuda().eval(),
         }
     ckpt = torch.load(ckpt_path, map_location="cuda", weights_only=True)
     built["policy_enc"].injection.load_state_dict(ckpt["injection"])
