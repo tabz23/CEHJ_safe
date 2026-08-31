@@ -359,7 +359,10 @@ class PanelVideoWriter:
             hit = touch or force >= 20.0
             f_color = (200, 60, 40) if hit else (60, 60, 60)
             tag = " TOUCH" if touch else ""
-            d.text((12, y), f"force = {force:5.1f} N{tag}", fill=f_color)
+            self._max_force = max(getattr(self, "_max_force", 0.0), force)
+            d.text((12, y),
+                   f"force = {force:5.1f} N  (max {self._max_force:.1f}){tag}",
+                   fill=f_color)
             y += 18
             # HOLD line with provenance, same format as record.py's recorder
             dbg = extras.get("hold_debug") or {}
