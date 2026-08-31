@@ -221,6 +221,15 @@ class CuroboIKController:
             )
             for p in (robot.left_mplib_planner, robot.right_mplib_planner):
                 p.plan_batch = types.MethodType(_mplib_plan_batch, p)
+                # mplib's plan_path rejects cuRobo-only kwargs — drop them
+                # (constraint_pose silently unenforced under the fallback)
+                orig_pp = p.plan_path
+
+                def _pp(*a, _orig=orig_pp, **kw):
+                    kw.pop("constraint_pose", None)
+                    return _orig(*a, **kw)
+
+                p.plan_path = _pp
             return robot.left_mplib_planner, robot.right_mplib_planner
 
         def set_planner(self, scene=None):
