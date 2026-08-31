@@ -130,10 +130,14 @@ rounds keep the loop tight (~5 min/round):
 
 ```
 python main/train/train.py --collect-rounds 10 --episodes-per-round 3 \
-    --grad-steps-per-round 256 --eval-every 256 \
+    --grad-steps-per-round 256 --eval-every 256 --leave-out franka-panda \
     --init-from <run_dir>/checkpoint.pt --buffer-dir <local>/buffer \
     --data <data_dir> --run <run_dir>
 ```
+
+(franka-panda is left out BY DEFAULT for test training: the buffer filter
+drops its samples, and the cross-embodiment sweep on franka runs every 10
+epochs — see below.)
 
 Per round you get: filter-episode videos (`round_videos` carousel in wandb +
 `eval/videos/`), per-metric heatmaps + trend.png under `eval/<metric>/`, and
