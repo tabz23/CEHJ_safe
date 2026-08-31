@@ -82,9 +82,11 @@ class Trainer:
         cfg.save(self.run_dir / "config.json")
 
         # buffer_dir override: sampling reads ~80 MB/grad-step — the memmap
-        # belongs on LOCAL disk (network FS reads stall training)
+        # belongs on LOCAL disk (network FS reads stall training). Default is
+        # per-RUN (never shared): two simultaneous LOO runs must not mmap the
+        # same files.
         buf_dir = (Path(buffer_dir).resolve() if buffer_dir
-                   else Path(data_root) / "buffer")
+                   else self.run_dir / "buffer")
         if not (buf_dir / "header.json").exists():
             # DAgger from scratch: size the buffer across ALL rounds up front
             # (open_memmap allocates at fixed capacity; append asserts on it)
@@ -539,7 +541,9 @@ def main() -> None:
         n_ep = args.episodes_per_round or (
             len(cfg.task_choices) * len(cfg.embodiment_choices)
         )
-        warmup_exists = (args.data / "buffer" / "header.json").exists()
+        eff_buf = (Path(args.buffer_dir).resolve() if args.buffer_dir
+                   else args.run / "buffer")
+        warmup_exists = (eff_buf / "header.json").exists()
         n_collects = args.collect_rounds + (0 if warmup_exists else 1)
         capacity = (n_collects * n_ep
                     * (cfg.max_steps_per_episode + 2)) if not warmup_exists else None

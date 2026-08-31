@@ -121,6 +121,22 @@ the training pool (1 for LOO, 4 for L4O): 3 filtered episodes per sweep,
 tasks rotating through the 5, under <run>/eval/cross_embodiment/ and wandb
 cross_overview/ + cross_heatmap/ + cross_videos.
 
+### Running several LOO/L4O splits in parallel
+
+Each run needs its OWN memmap buffer — two processes appending to the same
+memmap corrupt it. The default buffer location is <run_dir>/buffer (unique
+per run); with an explicit --buffer-dir, give every split its own local dir:
+
+```
+python main/train/train.py --leave-out piper        --run runs/loo_piper   --buffer-dir /local/buf_piper  --init-buffer <warmup>/buffer ...
+python main/train/train.py --leave-out franka-panda --run runs/loo_franka  --buffer-dir /local/buf_franka --init-buffer <warmup>/buffer ...
+```
+
+The warmup buffer is only ever READ (seeded via --init-buffer at startup), so
+all splits share it safely. run_online.py's async mode is the exception: its
+collector and trainer intentionally share one buffer inside a single job.
+
+
   behind training) but round mode is the debuggable default.
 
 ## Test training (fast pipeline check)
