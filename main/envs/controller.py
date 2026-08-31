@@ -179,6 +179,20 @@ class CuroboIKController:
                     ))
             out = {"status": status}
             if positions:
+                # mplib trajectories are variable-length; pad to the longest
+                # (repeat the final waypoint) to match cuRobo's (n, m, l)
+                positions = [
+                    np.concatenate(
+                        [p, np.repeat(p[-1:], max_len - len(p), axis=0)]
+                    ) if len(p) < max_len else p
+                    for p in positions
+                ] if (max_len := max(len(p) for p in positions)) else positions
+                velocities = [
+                    np.concatenate(
+                        [v, np.repeat(v[-1:], max_len - len(v), axis=0)]
+                    ) if len(v) < max_len else v
+                    for v in velocities
+                ]
                 out["position"] = np.stack(positions)
                 out["velocity"] = np.stack(velocities)
             return out
