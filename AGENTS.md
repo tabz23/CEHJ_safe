@@ -151,7 +151,6 @@ collector and trainer intentionally share one buffer inside a single job.
 
 
   behind training) but round mode is the debuggable default.
-
 ## Test training (fast pipeline check)
 
 Reuse the existing warmup buffer and resume from any checkpoint; small
