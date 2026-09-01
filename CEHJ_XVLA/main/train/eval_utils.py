@@ -240,6 +240,10 @@ def run_cross_eval(cfg, sweep: int, left_embs, encoder, actor,
             continue
         trace = ro.run()
         video.close()
+        if not trace["h"]:
+            print(f"[cross] sweep {sweep}: {emb}/{task} produced no ticks; "
+                  f"skipping")
+            continue
         rmet.record(sweep, task, emb,
                     compute_trace_metrics(trace, float(cfg_ep.h_scale)))
         print(f"[cross] sweep {sweep}: {emb}/{task} "

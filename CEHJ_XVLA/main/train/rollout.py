@@ -610,7 +610,7 @@ class RolloutController:
         spt = self.ctrl.steps_per_tick
         if cache is not None and 0 <= self._n_physics - cache[0] <= spt:
             return cache[1]
-        return self._encode_obs(self.env.get_xvla_obs())
+        return self._encode_obs(self.env.get_xvla_obs())[2]  # enc namespace
 
     def _encode_obs(self, obs):
         """obs -> (scene_raw [1,200,1024], proprio np [20], enc namespace)
