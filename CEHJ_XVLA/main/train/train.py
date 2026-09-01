@@ -495,6 +495,9 @@ def main() -> None:
                         "so every round covers the full product")
     p.add_argument("--grad-steps-per-round", type=int, default=1024)
     p.add_argument("--no-wandb", action="store_true")
+    p.add_argument("--filter-margin", type=float, default=None,
+                   help="metres: safe actor drives while Q(s,a_nom) "
+                        "< margin (0 = only predicted penetration)")
     p.add_argument("--leave-out", default=None,
                    help="leave-one-out phase 1: exclude this embodiment")
     p.add_argument("--only-embodiment", default=None,
@@ -547,6 +550,8 @@ def main() -> None:
         cfg.eval_every = args.eval_every
         cfg.eval_sweep_every_epochs = args.eval_sweep_every_epochs
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
+        if args.filter_margin is not None:
+            cfg.filter_margin = args.filter_margin
         n_ep = args.episodes_per_round or (
             len(cfg.task_choices) * len(cfg.embodiment_choices)
         )
@@ -659,6 +664,8 @@ def main() -> None:
         cfg.eval_every = args.eval_every
         cfg.eval_sweep_every_epochs = args.eval_sweep_every_epochs
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
+        if args.filter_margin is not None:
+            cfg.filter_margin = args.filter_margin
         if run is not None:
             run.config.update(cfg.to_dict())
         trainer = Trainer(cfg, args.data, args.run, buffer_dir=args.buffer_dir)

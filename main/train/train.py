@@ -501,6 +501,9 @@ def main() -> None:
                    help="both ablations: plain cross-attention over frozen "
                         "HoloBrain state + scene tokens")
     p.add_argument("--no-wandb", action="store_true")
+    p.add_argument("--filter-margin", type=float, default=None,
+                   help="metres: safe actor drives while Q(s,a_nom) "
+                        "< margin (0 = only predicted penetration)")
     p.add_argument("--leave-out", default=None,
                    help="leave-one-out phase 1: exclude this embodiment")
     p.add_argument("--only-embodiment", default=None,
@@ -566,6 +569,8 @@ def main() -> None:
         cfg.eval_every = args.eval_every
         cfg.eval_sweep_every_epochs = args.eval_sweep_every_epochs
         cfg.ablate_geometry = args.ablate_geometry
+        if args.filter_margin is not None:
+            cfg.filter_margin = args.filter_margin
         cfg.ablate_injection = args.ablate_injection
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
         n_ep = args.episodes_per_round or (
@@ -680,6 +685,8 @@ def main() -> None:
         cfg.eval_every = args.eval_every
         cfg.eval_sweep_every_epochs = args.eval_sweep_every_epochs
         cfg.ablate_geometry = args.ablate_geometry
+        if args.filter_margin is not None:
+            cfg.filter_margin = args.filter_margin
         cfg.ablate_injection = args.ablate_injection
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
         if run is not None:

@@ -486,6 +486,9 @@ def main() -> None:
                         "--watch mode this only sizes the schedule cycle)")
     p.add_argument("--task", default="stack_blocks_two")
     p.add_argument("--embodiment", default="piper")
+    p.add_argument("--filter-margin", type=float, default=None,
+                   help="metres: safe actor drives while Q(s,a_nom) "
+                        "< margin (0 = only predicted penetration)")
     p.add_argument("--leave-out", default=None,
                    help="leave-one-out: exclude this embodiment from the pool")
     p.add_argument("--only-embodiment", default=None,
@@ -520,6 +523,8 @@ def main() -> None:
     cfg = FrozenConfig(task=args.task, embodiment=args.embodiment,
                        n_episodes=args.episodes)
     apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
+    if getattr(args, "filter_margin", None) is not None:
+        cfg.filter_margin = args.filter_margin
     collect(cfg, args.out, watch=args.watch, follow=args.follow,
             capacity=args.capacity or None, success_only=args.success_only,
             max_slot_retries=args.max_slot_retries,
