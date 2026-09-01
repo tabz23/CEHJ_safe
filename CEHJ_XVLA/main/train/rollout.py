@@ -572,8 +572,9 @@ class RolloutController:
             self._pending["action_source"] = np.int8(self._tick_source)
             # realized-vs-commanded (xyz block only): how much of the
             # commanded EE translation the drive actually achieved
+            # 18-dim action: arm blocks are 9 wide (dxyz + drot6d)
             cmd = np.concatenate(
-                [self._pending["action"][0:3], self._pending["action"][10:13]]
+                [self._pending["action"][0:3], self._pending["action"][9:12]]
             )
             denom = float(np.linalg.norm(cmd))
             if denom > 1e-6:
