@@ -19,12 +19,17 @@ import torch
 
 class SafetyFilter:
     def __init__(self, actor, critics, joint_index, dtheta_max,
-                 margin: float, hold_ticks: int = 3):
+                 margin: float, hold_ticks: int = 3,
+                 release_margin: float | None = None):
         self.actor = actor
         self.critics = critics
         self.joint_index = joint_index
         self.dtheta_max = dtheta_max
         self.margin = float(margin)     # in h*h_scale units
+        # hysteresis: once engaged, hold until Q clears the release margin
+        # (default = margin, i.e. single threshold as before)
+        self.release_margin = (float(margin) if release_margin is None
+                               else float(release_margin))
         self.hold_ticks = int(hold_ticks)
         self.n_interventions = 0
         self.n_switches = 0             # chatter diagnostic

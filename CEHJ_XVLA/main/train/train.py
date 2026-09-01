@@ -498,6 +498,9 @@ def main() -> None:
     p.add_argument("--cross-eval-every-epochs", type=int, default=10,
                    help="eval the left-out embodiment(s) every N rounds "
                         "(3 episodes, tasks rotating)")
+    p.add_argument("--filter-release-margin", type=float, default=None,
+                   help="metres: once engaged, safe actor holds until "
+                        "Q >= this (default cfg 0.01 = 1 cm)")
     p.add_argument("--filter-margin", type=float, default=None,
                    help="metres: safe actor drives while Q(s,a_nom) "
                         "< margin (0 = only predicted penetration)")
@@ -559,6 +562,8 @@ def main() -> None:
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
         if args.filter_margin is not None:
             cfg.filter_margin = args.filter_margin
+        if args.filter_release_margin is not None:
+            cfg.filter_release_margin = args.filter_release_margin
         n_ep = args.episodes_per_round or (
             len(cfg.task_choices) * len(cfg.embodiment_choices)
         )
@@ -673,6 +678,8 @@ def main() -> None:
         apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
         if args.filter_margin is not None:
             cfg.filter_margin = args.filter_margin
+        if args.filter_release_margin is not None:
+            cfg.filter_release_margin = args.filter_release_margin
         if run is not None:
             run.config.update(cfg.to_dict())
         trainer = Trainer(cfg, args.data, args.run, buffer_dir=args.buffer_dir)

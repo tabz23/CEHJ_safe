@@ -96,6 +96,7 @@ class RolloutController:
                     self.extractor.delta_theta_max.astype(np.float32)
                 ).cuda(),
                 margin=float(getattr(cfg, "filter_margin", 0.0)) * hs,
+                release_margin=float(getattr(cfg, "filter_release_margin", 0.01)) * hs,
                 hold_ticks=int(getattr(cfg, "hj_hold_ticks", 3)),
             )
         self.trace = {"t": [], "h": [], "V_t": [], "V": [], "intervened": [],
@@ -160,7 +161,12 @@ class RolloutController:
         t_now = self._n_physics / self.env.PHYSICS_FREQ
         self.trace["V_t"].append(t_now)
         self.trace["V"].append(q_nom)
-        engaged = q_nom < self.flt.margin
+        # hysteresis: engaged holds until Q clears the release margin;
+        # free nominal engages only below the (tighter) engage margin
+        if self.flt._was_engaged:
+            engaged = q_nom < self.flt.release_margin
+        else:
+            engaged = q_nom < self.flt.margin
         self.trace["intervened"].append(engaged)
         self.flt.track(engaged)
         if not engaged:

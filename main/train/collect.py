@@ -525,6 +525,8 @@ def main() -> None:
     apply_embodiment_selection(cfg, args.leave_out, args.only_embodiment)
     if getattr(args, "filter_margin", None) is not None:
         cfg.filter_margin = args.filter_margin
+    if getattr(args, "filter_release_margin", None) is not None:
+        cfg.filter_release_margin = args.filter_release_margin
     collect(cfg, args.out, watch=args.watch, follow=args.follow,
             capacity=args.capacity or None, success_only=args.success_only,
             max_slot_retries=args.max_slot_retries,
