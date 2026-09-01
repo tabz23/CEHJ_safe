@@ -101,7 +101,9 @@ class FrozenConfig:
                                         # round collection records filter metrics
                                         # (RoundMetrics); >0 re-enables sweeps
     eval_ema: float = 0.7               # EMA decay for per-(task,embodiment) metrics
-    checkpoint_every: int = 1024        # publish weights every N steps
+    checkpoint_every: int = 1024        # publish weights every N steps (async collector
+                                        # --follow reloads on checkpoint change)
+    save_every_epochs: int = 20          # snapshot checkpoint_epoch<N>.pt every N epochs
     eval_seeds: tuple = (1000, 1001)
 
     # deployment filter: zero threshold — engage when Q(s, a_nom) < 0

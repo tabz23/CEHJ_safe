@@ -415,6 +415,12 @@ class Trainer:
             if self.step % self.cfg.checkpoint_every == 0:
                 # publish weights so a --follow collector picks them up
                 self.save_checkpoint(self.run_dir / "checkpoint.pt")
+            # epoch snapshots: checkpoint_epoch<N>.pt every save_every_epochs
+            swe = int(getattr(self.cfg, "save_every_epochs", 0))
+            if swe > 0 and self.step % (swe * self.cfg.eval_every) == 0:
+                self.save_checkpoint(
+                    self.run_dir / f"checkpoint_epoch{self.step // self.cfg.eval_every}.pt"
+                )
             if self.step % 20 == 0:
                 sps = (self.step + 1) / (time.time() - t0 + 1e-9)
                 print(
