@@ -66,6 +66,7 @@ import torch
 from main.train.collect import make_training_env  # noqa: E402
 from main.train.config import instruction_for  # noqa: E402
 from main.train.hfunc import compute_h  # noqa: E402
+from main.network.body_features import BodyTokenExtractor  # noqa: E402
 from main.envs.distance import obstacle_contact  # noqa: E402
 
 
@@ -259,6 +260,10 @@ class RolloutController:
             )
             self._serial.append(sc)
         self.dls_lambda = 0.05    # damped-least-squares lambda for J+
+        # sim-consistent Jacobians (the parent's BodyTokenExtractor path:
+        # joint axes from FK composed with the live base pose, link points
+        # from the sim — verified against SAPIEN there)
+        self._extractor = BodyTokenExtractor(self.env)
 
         self.flt = None
         self.filter_active = bool(filter_active)
@@ -384,16 +389,31 @@ class RolloutController:
         return a
 
     # ---------------- EE6D execution ----------------
+    @staticmethod
+    def _skew(v):
+        return np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+
     def _arm_jacobian(self, arm_i: int, q_arm: np.ndarray) -> np.ndarray:
-        """Geometric Jacobian [6, n_arm] of the arm's end link at q_arm,
-        world frame (pk computes it in the kin base frame; rows are
-        [linear; angular])."""
-        q = torch.as_tensor(q_arm, dtype=torch.float32)[None]
-        J = self._serial[arm_i].jacobian(q)[0].double().numpy()  # [6, n]
-        # pk's SerialChain Jacobian is already in the dual-arm URDF root
-        # frame = the frame FK + T_base2world measures EE poses in (verified
-        # by FD against the live sim: applying R again rotated +x -> +y).
-        return np.block([[J[:3]], [J[3:]]])
+        """Jacobian [6, n_arm] of the arm's EE (the measured endpose point) in
+        world frame, from the verified BodyTokenExtractor path: per-link
+        Jacobians are sim-consistent (FK axes composed with the live base
+        pose, link points from SAPIEN); evaluate at the EE point via
+        J_ee = J_link - skew(p_ee - p_link) @ J_ang."""
+        body = self._extractor.extract()
+        Jlin = body["Jlin"].numpy().astype(np.float64)   # [tok, 3, 2n]
+        Jang = body["Jang"].numpy().astype(np.float64)
+        lp = body["link_pos"].numpy().astype(np.float64)
+        spec = self._extractor.specs[arm_i]
+        n_link = len(spec.arm_links) + (1 if spec.gripper_links else 0)
+        n_joint = spec.n_joints
+        ee_tok = arm_i * n_link + len(spec.arm_links) - 1   # last arm link
+        col = arm_i * n_joint
+        Jl = Jlin[ee_tok][:, col:col + n_joint]
+        Ja = Jang[ee_tok][:, col:col + n_joint]
+        p_ee = np.asarray(self._ee_state()["ee_poses"][arm_i][:3],
+                          dtype=np.float64)
+        Jl_ee = Jl - self._skew(p_ee - lp[ee_tok]) @ Ja
+        return np.vstack([Jl_ee, Ja])
 
     def _execute_ee6d(self, action: np.ndarray) -> None:
         """EE6D delta -> per-tick joint displacement -> env.step_dtheta.
@@ -413,7 +433,8 @@ class RolloutController:
             n = self._n_arm[arm_i]
             lam2 = self.dls_lambda ** 2
             dq_arm = J.T @ np.linalg.solve(J @ J.T + lam2 * np.eye(6), dx)
-            dq[arm_i * n: (arm_i + 1) * n] = dq_arm
+            dq[arm_i * n: (arm_i + 1) * n] = dq_arm[:n]  # arm joints only
+            # (the extractor's J has prismatic gripper columns after them)
         self.env.step_dtheta(dq)
 
     # ---------------- per-tick hook ----------------
