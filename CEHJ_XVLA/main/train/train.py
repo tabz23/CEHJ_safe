@@ -496,7 +496,7 @@ def main() -> None:
     p.add_argument("--grad-steps-per-round", type=int, default=1024)
     p.add_argument("--no-wandb", action="store_true")
     p.add_argument("--cross-eval-every-epochs", type=int, default=10,
-                   help="eval the left-out embodiment(s) every N epochs "
+                   help="eval the left-out embodiment(s) every N rounds "
                         "(3 episodes, tasks rotating)")
     p.add_argument("--filter-margin", type=float, default=None,
                    help="metres: safe actor drives while Q(s,a_nom) "
@@ -609,9 +609,8 @@ def main() -> None:
         # cross-embodiment eval: every 10 epochs, 3 filtered episodes on the
         # embodiment(s) excluded from training (LOO), tasks rotating
         left_embs = [e for e in EMBODIMENT_IDS if e not in cfg.embodiment_choices]
-        cross_every = args.cross_eval_every_epochs * args.eval_every
+        cross_every = args.cross_eval_every_epochs  # in ROUNDS (= epochs)
         cross_sweep = 0
-        last_cross_step = 0
         for r in range(args.collect_rounds):
             trainer.train_steps(args.grad_steps_per_round, run)
             trainer.save_checkpoint(args.run / "checkpoint.pt")
@@ -647,7 +646,7 @@ def main() -> None:
                 if vids:
                     _safe_wandb_log(run, {"round_videos": vids},
                                     trainer.step)
-            if left_embs and trainer.step - last_cross_step >= cross_every:
+            if left_embs and (r + 1) % cross_every == 0:
                 from main.train.eval_utils import run_cross_eval
 
                 run_cross_eval(cfg, cross_sweep, left_embs,
@@ -656,7 +655,6 @@ def main() -> None:
                                args.run / "eval" / "cross_embodiment",
                                wandb_run=run, step=trainer.step)
                 cross_sweep += 1
-                last_cross_step = trainer.step
         # final render (all rounds accumulated) instead of the removed sweep
         rmet.render(args.run / "eval", tag="final",
                     tasks=list(cfg.task_choices),
