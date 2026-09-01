@@ -44,7 +44,7 @@ class SafetyFilter:
     @torch.no_grad()
     def q_actor(self, enc, Jlin, Jang) -> torch.Tensor:
         """V(s) = min-twin Q under the deterministic safe actor (diagnostic)."""
-        dtheta_pi, _, _ = self.actor(
+        dtheta_pi, _, _, _ = self.actor(
             enc.body, self.joint_index, self.dtheta_max, deterministic=True
         )
         return self.critics.qmin(enc, dtheta_pi, Jlin, Jang, self.joint_index)
@@ -52,7 +52,7 @@ class SafetyFilter:
     @torch.no_grad()
     def actor_action(self, enc) -> torch.Tensor:
         """The safe actor's deterministic action for this tick."""
-        dtheta_pi, _, _ = self.actor(
+        dtheta_pi, _, _, _ = self.actor(
             enc.body, self.joint_index, self.dtheta_max, deterministic=True
         )
         return dtheta_pi

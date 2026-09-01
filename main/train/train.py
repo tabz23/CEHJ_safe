@@ -8,7 +8,9 @@ represents the backward reachable set):
     loss_pi = -Q_min(s, pi(s)) + alpha * logp
 
 Annealing: gamma -> 1 (so V doesn't sit at h because the recursion never
-looks far — watch the h - V gap open), alpha -> 0 aggressively.
+looks far — watch the h - V gap open), alpha -> a small floor (0.02), not
+0: alpha*logp is the only barrier keeping the actor off the tanh walls,
+and the critic has no data there (see config.py alpha_final).
 
 NOTE on the Bellman operator: the target is deliberately the HARD Bellman
 (no -alpha*logp_n) while the actor loss keeps the entropy term. alpha is an
@@ -203,7 +205,7 @@ class Trainer:
         gamma, alpha = self.gamma(), self.alpha()
 
         with torch.no_grad():
-            a_n, logp_n, _ = self.actor(enc_n.body, ji_n, dtheta_max_n)
+            a_n, logp_n, _, _ = self.actor(enc_n.body, ji_n, dtheta_max_n)
             q1_t, q2_t, _, _ = self.critics_targ(enc_n, a_n, Jlin_n, Jang_n, ji_n)
             q_next = torch.minimum(q1_t, q2_t)
             target = (1 - gamma) * h + gamma * torch.minimum(h, q_next)
@@ -232,9 +234,16 @@ class Trainer:
             enc.body.detach(), enc.pos.detach(), enc.mask,
             enc.scene.detach(), enc.scene_pos.detach(), enc.scene_mask,
         )
-        a_pi, logp, n_act = self.actor(enc_det.body, ji, dtheta_max)
+        a_pi, logp, n_act, pre_pi = self.actor(enc_det.body, ji, dtheta_max)
         q1_pi, q2_pi, _, _ = self.critics(enc_det, a_pi, Jlin, Jang, ji)
-        loss_pi = (-torch.minimum(q1_pi, q2_pi) + alpha * logp).mean()
+        # pre-activation penalty: pull mu off the tanh walls INDEPENDENTLY of
+        # alpha (saturation zeroes 1-u^2 gradients — the actor can't climb
+        # back out); per-sample mean over valid joints keeps it
+        # embodiment-count invariant
+        jvalid = (ji >= 0) if ji.dim() == 2 else (ji >= 0)[None].expand_as(pre_pi)
+        pen = (pre_pi.pow(2) * jvalid).sum(-1) / jvalid.sum(-1).clamp_min(1)
+        loss_pi = (-torch.minimum(q1_pi, q2_pi) + alpha * logp
+                   + 1e-3 * pen).mean()
         self.opt_a.zero_grad(set_to_none=True)
         loss_pi.backward()
         gn_a = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 10.0)
@@ -266,8 +275,8 @@ class Trainer:
         # everywhere?): diversity of the deterministic action across states,
         # and how hard it leans on the tanh bound. Masked to real joints.
         with torch.no_grad():
-            a_det, _, _ = self.actor(enc_det.body, ji, dtheta_max,
-                                     deterministic=True)
+            a_det, _, _, _ = self.actor(enc_det.body, ji, dtheta_max,
+                                        deterministic=True)
             jmask = (dtheta_max > 0).float()
             out["actor/action_std"] = float(
                 (a_det.std(dim=0) * jmask).sum() / jmask.sum().clamp_min(1)
@@ -278,6 +287,18 @@ class Trainer:
             )
             out["data/action_std"] = float(
                 (dtheta.std(dim=0) * jmask).sum() / jmask.sum().clamp_min(1)
+            )
+            # critic action sensitivity: does Q move between two random
+            # in-box actions? If this is ~0 relative to Q's scale, the
+            # actor's gradient is noise and actor regularization won't help
+            a_r1 = (torch.rand_like(dtheta) * 2 - 1) * dtheta_max
+            a_r2 = (torch.rand_like(dtheta) * 2 - 1) * dtheta_max
+            q_sens = (self.critics.qmin(enc_det, a_r1, Jlin, Jang, ji)
+                      - self.critics.qmin(enc_det, a_r2, Jlin, Jang, ji)
+                      ).abs().mean()
+            out["critic/action_sens"] = float(q_sens)
+            out["critic/action_sens_rel"] = float(
+                q_sens / qmin.detach().abs().mean().clamp_min(1e-9)
             )
         # collision precision/recall: predicted unsafe = Q(s,a) below the
         # filter margin; ground truth = next state actually violated (h < 0,

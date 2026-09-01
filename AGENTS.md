@@ -258,13 +258,13 @@ over unless noted:
   encoder.py. pip deps `fastapi uvicorn json_numpy` were added to the
   RoboTwin env for the ckpt's imports.
 - Action: EE6D delta per arm [dxyz(3), drot6d(6)], 18 dims total, bounded
-  per-dim by `cfg.ee_step_max` (0.05 m xyz / full unit-range rot6d per
+  per-dim by `cfg.ee_step_max` (0.025 m xyz / full unit-range rot6d per
   tick). No gripper channel — the filter never drives it. Before the DLS
   solve the commanded delta is clipped (`rollout.py::_execute_ee6d`):
   the translation target p_ee + dxyz is clipped into the arm's workspace
   (reach sphere of radius l_reach about the static base link, z >=
   table_height + table_margin) and the rotation angle is capped at
-  `cfg.ee_rot_max` (0.5 rad/tick, axis-angle clamp of R_delta).
+  `cfg.ee_rot_max` (0.25 rad/tick, axis-angle clamp of R_delta).
   Execution: Δx = [dxyz, axis-angle(R_delta)] -> dq = J⁺Δx (damped least
   squares, sim-consistent BodyTokenExtractor Jacobian) ->
   `env.step_dtheta`, the same 10-substep tick as the parent.

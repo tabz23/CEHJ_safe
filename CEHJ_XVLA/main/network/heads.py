@@ -61,24 +61,29 @@ class EE6DActor(nn.Module):
         self.head = nn.Linear(dim, EE6D_ARM_DIM * 2)  # mean + logstd per arm
 
     def forward(self, arm_tokens, scene, scene_mask, step_max, deterministic=False):
-        """arm_tokens [B,2,D] -> a [B, 18] EE6D delta, tanh-bounded by step_max."""
+        """arm_tokens [B,2,D] -> a [B, 18] EE6D delta, tanh-bounded by step_max.
+
+        Also returns pre (pre-tanh activations, [B, 2, 9]) for the actor
+        loss's mu penalty — keeps mu off the tanh walls independently of
+        alpha (saturation zeroes 1-u^2 gradients)."""
         B = arm_tokens.shape[0]
         h = self.trunk(arm_tokens, scene, scene_mask)         # [B, 2, D]
         mu, logstd = self.head(h).chunk(2, dim=-1)            # [B, 2, 9]
-        logstd = logstd.clamp(-5, 2)
+        logstd = logstd.clamp(-5, 0)
         if deterministic:
+            pre = mu
             a = torch.tanh(mu)
             logp = torch.zeros(B, device=mu.device)
         else:
             std = logstd.exp()
             eps = torch.randn_like(mu)
-            a_raw = mu + eps * std
-            a = torch.tanh(a_raw)
+            pre = mu + eps * std
+            a = torch.tanh(pre)
             logp = (-0.5 * (eps ** 2) - logstd - _LOG_2PI_HALF).sum(-1).sum(-1)
-            logp = logp - (2 * (math.log(2.0) - a_raw
-                              - torch.nn.functional.softplus(-2 * a_raw))
+            logp = logp - (2 * (math.log(2.0) - pre
+                              - torch.nn.functional.softplus(-2 * pre))
                            ).sum(-1).sum(-1)
-        return (a * step_max.view(B, 2, EE6D_ARM_DIM)).view(B, N_ACTION), logp
+        return (a * step_max.view(B, 2, EE6D_ARM_DIM)).view(B, N_ACTION), logp, pre
 
 
 class EE6DTwinCritic(nn.Module):

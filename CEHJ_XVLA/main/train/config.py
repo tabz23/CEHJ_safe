@@ -44,13 +44,13 @@ class FrozenConfig:
     # problem definition (change what V means)
     control_dt: float = 0.04            # 25 Hz control: 250/25 = exactly 10 physics steps/tick
     # per-dim EE6D action bound per tick (one arm's 9-dim block, applied to
-    # both arms): xyz 0.05 m/tick at 25 Hz (= 1.25 m/s), rot6d 1.0 (the two
-    # stored columns are unit vectors — full range, so any delta rotation is
-    # representable; the rotation ANGLE is capped separately by ee_rot_max at
-    # execution, not by the per-dim box); no gripper channel
-    ee_step_max: tuple = (0.05, 0.05, 0.05,
+    # both arms): xyz 0.025 m/tick at 25 Hz (= 0.625 m/s), rot6d 1.0 (the
+    # two stored columns are unit vectors — full range, so any delta
+    # rotation is representable; the rotation ANGLE is capped separately by
+    # ee_rot_max at execution, not by the per-dim box); no gripper channel
+    ee_step_max: tuple = (0.025, 0.025, 0.025,
                           1.0, 1.0, 1.0, 1.0, 1.0, 1.0)  # no gripper dim
-    ee_rot_max: float = 0.5             # rad/tick cap on the executed delta-
+    ee_rot_max: float = 0.25            # rad/tick cap on the executed delta-
                                         # rotation angle (axis-angle norm of
                                         # R_delta, clamped in _execute_ee6d)
     softmin_T: float = 0.02             # metres; softmin temperature
@@ -97,9 +97,13 @@ class FrozenConfig:
     batch_size: int = 64
     lr: float = 3e-4
     tau: float = 0.005                  # target critic Polyak
-    alpha_start: float = 0.2            # entropy temperature (annealed -> 0)
-    alpha_final: float = 0.0
-    alpha_anneal_steps: int = 20_000    # aggressive: unsafe-optimistic bonus
+    alpha_start: float = 0.2            # entropy temperature (annealed -> alpha_final)
+    alpha_final: float = 0.02           # NOT 0 — see the parent config.py: at
+                                        # alpha=0 the tanh saturation barrier
+                                        # -alpha*log(1-u^2) vanishes and the
+                                        # actor slams into the box walls the
+                                        # critic never saw (sat_frac cliff).
+    alpha_anneal_steps: int = 20_000
     grad_steps: int = 204800            # 200 epochs x 1024 (real training default)
     eval_every: int = 1024              # one epoch = 1024 grad steps (test runs: 50)
     eval_sweep_every_epochs: int = 0    # rollout sweeps disabled by default —

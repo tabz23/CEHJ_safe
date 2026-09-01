@@ -62,12 +62,20 @@ class FrozenConfig:
     rgbsd_archive_every: int = 25       # low-cadence RGB-D archive stride
 
     # SAC
-    batch_size: int = 64
+    batch_size: int = 128
     lr: float = 3e-4
     tau: float = 0.005                  # target critic Polyak
-    alpha_start: float = 0.2            # entropy temperature (annealed -> 0)
-    alpha_final: float = 0.0
-    alpha_anneal_steps: int = 20_000    # aggressive: unsafe-optimistic bonus
+    alpha_start: float = 0.2            # entropy temperature (annealed -> alpha_final)
+    alpha_final: float = 0.02           # NOT 0: alpha only regularizes the
+                                        # actor (the Bellman target is hard),
+                                        # and alpha*logp carries the tanh
+                                        # barrier -alpha*log(1-u^2) -> +inf at
+                                        # the box walls. At alpha=0 the actor
+                                        # becomes pure argmax_Q and slams into
+                                        # the boundary the critic never saw
+                                        # (sat_frac cliff at 20k, bang-bang
+                                        # actions) — keep a floor.
+    alpha_anneal_steps: int = 20_000
     grad_steps: int = 204800            # 200 epochs x 1024 (real training default)
     eval_every: int = 1024              # one epoch = 1024 grad steps (test runs: 50)
     eval_sweep_every_epochs: int = 0    # rollout sweeps disabled by default —

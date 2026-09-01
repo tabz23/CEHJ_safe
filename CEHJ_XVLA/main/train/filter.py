@@ -46,16 +46,16 @@ class SafetyFilter:
     @torch.no_grad()
     def q_actor(self, enc) -> torch.Tensor:
         """V(s) = min-twin Q under the deterministic safe actor (diagnostic)."""
-        a_pi, _ = self.actor(enc.arm_tokens, enc.scene, enc.scene_mask,
-                             self.step_max, deterministic=True)
+        a_pi, _, _ = self.actor(enc.arm_tokens, enc.scene, enc.scene_mask,
+                                self.step_max, deterministic=True)
         return self.critics.qmin(enc.arm_tokens, enc.scene, enc.scene_mask,
                                  a_pi)
 
     @torch.no_grad()
     def actor_action(self, enc) -> torch.Tensor:
         """The safe actor's deterministic EE6D delta for this tick."""
-        a_pi, _ = self.actor(enc.arm_tokens, enc.scene, enc.scene_mask,
-                             self.step_max, deterministic=True)
+        a_pi, _, _ = self.actor(enc.arm_tokens, enc.scene, enc.scene_mask,
+                                self.step_max, deterministic=True)
         return a_pi
 
     def track(self, engaged: bool) -> None:

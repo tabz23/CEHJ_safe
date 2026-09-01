@@ -11,6 +11,7 @@ in :  body [B, 22, 256]        trunk output
 out:  dtheta [B, A]            the action (|dtheta| <= dtheta_max by tanh)
       logp   [B]               for SAC
       n_act  [B]               active dims, for the per-sample entropy target
+      pre    [B, M]            pre-tanh activations (actor-loss mu penalty)
 
 Design notes:
   - residual tokens are dropped first: they carry value heads, not action
@@ -247,7 +248,7 @@ class TokenActor(nn.Module):
         # padded M) — never a hardcoded residual count
         body_only = body[:, : joint_index.shape[1]]
         mu, log_std = self.head(body_only).unbind(-1)  # [B, M] each
-        log_std = log_std.clamp(-8, 2)                 # keep std in a sane range
+        log_std = log_std.clamp(-5, 0)                 # keep std in a sane range
         std = log_std.exp()
 
         if deterministic:
@@ -274,4 +275,7 @@ class TokenActor(nn.Module):
         # scale LAST: |dtheta| <= dtheta_max by construction
         dtheta = act * dtheta_max
         n_act = valid.sum(-1)                          # per-sample entropy target
-        return dtheta, logp, n_act
+        # pre: raw pre-tanh activation [B, M] (padded slots included) — the
+        # actor loss penalizes pre^2 on valid slots to keep mu off the tanh
+        # walls independently of alpha (saturation kills 1-u^2 gradients)
+        return dtheta, logp, n_act, pre

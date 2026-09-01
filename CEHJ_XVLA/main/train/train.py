@@ -205,7 +205,7 @@ class Trainer:
         gamma, alpha = self.gamma(), self.alpha()
 
         with torch.no_grad():
-            a_n, logp_n = self.actor(arm_n, scene_n, scene_mask_n, step_max)
+            a_n, logp_n, _ = self.actor(arm_n, scene_n, scene_mask_n, step_max)
             q1_t, q2_t, _, _ = self.critics_targ(
                 arm_n, scene_n, scene_mask_n, a_n)
             q_next = torch.minimum(q1_t, q2_t)
@@ -232,11 +232,14 @@ class Trainer:
             p.requires_grad_(False)
         for p in self.critics.parameters():
             p.requires_grad_(False)
-        a_pi, logp = self.actor(arm.detach(), scene.detach(), scene_mask,
-                                step_max)
+        a_pi, logp, pre_pi = self.actor(arm.detach(), scene.detach(),
+                                        scene_mask, step_max)
         q1_pi, q2_pi, _, _ = self.critics(
             arm.detach(), scene.detach(), scene_mask, a_pi)
-        loss_pi = (-torch.minimum(q1_pi, q2_pi) + alpha * logp).mean()
+        # pre-activation penalty: keep mu off the tanh walls INDEPENDENTLY of
+        # alpha (saturation zeroes 1-u^2 gradients — see parent config.py)
+        loss_pi = ((-torch.minimum(q1_pi, q2_pi) + alpha * logp).mean()
+                   + 1e-3 * pre_pi.pow(2).mean())
         self.opt_a.zero_grad(set_to_none=True)
         loss_pi.backward()
         gn_a = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 10.0)
@@ -270,14 +273,27 @@ class Trainer:
         # everywhere?): diversity of the deterministic action across states,
         # and how hard it leans on the tanh bound
         with torch.no_grad():
-            a_det, _ = self.actor(arm.detach(), scene.detach(), scene_mask,
-                                  step_max, deterministic=True)
+            a_det, _, _ = self.actor(arm.detach(), scene.detach(), scene_mask,
+                                     step_max, deterministic=True)
             out["actor/action_std"] = float(a_det.std(dim=0).mean())
             out["actor/sat_frac"] = float(
                 ((a_det.abs() / step_max.clamp_min(1e-9)) > 0.95
                  ).float().mean()
             )
             out["data/action_std"] = float(action.std(dim=0).mean())
+            # critic action sensitivity: does Q move between two random
+            # in-box actions? If ~0 relative to Q's scale, the actor's
+            # gradient is noise (see parent train.py)
+            a_r1 = (torch.rand_like(action) * 2 - 1) * step_max
+            a_r2 = (torch.rand_like(action) * 2 - 1) * step_max
+            q_sens = (self.critics.qmin(arm.detach(), scene.detach(),
+                                        scene_mask, a_r1)
+                      - self.critics.qmin(arm.detach(), scene.detach(),
+                                          scene_mask, a_r2)).abs().mean()
+            out["critic/action_sens"] = float(q_sens)
+            out["critic/action_sens_rel"] = float(
+                q_sens / qmin.detach().abs().mean().clamp_min(1e-9)
+            )
         # collision precision/recall: predicted unsafe = Q(s,a) below the
         # filter margin; ground truth = next state actually violated (h < 0,
         # h is stored in h_scale units like the margin). The filter's core
@@ -486,6 +502,9 @@ def main() -> None:
     p.add_argument("--warmup-episodes", type=int, default=0,
                    help="no warmup buffer? collect N success-only nominal "
                         "episodes first (capacity sized for them)")
+    p.add_argument("--warmup-keep-failed", action="store_true",
+                   help="warmup keeps failed episodes too (default is "
+                        "success-only)")
     p.add_argument("--collect-rounds", type=int, default=0,
                    help=">0: DAgger loop — collect N rounds (round 0 "
                         "nominal-only, later rounds cfg.filter_episode_frac "
@@ -605,12 +624,14 @@ def main() -> None:
         id_base = 10_000 if warmup_exists else 0
         if not warmup_exists:
             if n_warm > 0:
-                # from-scratch: success-only nominal warmup (same semantics as
-                # collect.py --success-only), videos recorded
+                # from-scratch: nominal warmup (same semantics as collect.py),
+                # videos recorded; success-only unless --warmup-keep-failed
                 cfg_w = dataclasses.replace(cfg, n_episodes=n_warm)
                 collect(cfg_w, args.data, buf=trainer.buf, episode_offset=0,
                         encoder=trainer.encoder, models=None,
-                        round_index=0, success_only=True, record_video=True)
+                        round_index=0,
+                        success_only=not args.warmup_keep_failed,
+                        record_video=True)
             else:
                 cfg_w = dataclasses.replace(cfg, n_episodes=n_ep)
                 collect(cfg_w, args.data, buf=trainer.buf, episode_offset=0,
