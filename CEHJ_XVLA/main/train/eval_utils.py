@@ -78,6 +78,7 @@ def run_eval_episode(cfg, seed, task, embodiment, encoder, actor,
     """
     import dataclasses
 
+    from main.train.collect import KIN_URDF_DIR, make_kinematics
     from main.train.rollout import RolloutController
 
     cfg_ep = dataclasses.replace(cfg, task=task, embodiment=embodiment)
@@ -86,6 +87,7 @@ def run_eval_episode(cfg, seed, task, embodiment, encoder, actor,
         rng = np.random.RandomState(seed)
         mode = "off_path" if rng.rand() < cfg_ep.off_path_frac else "on_path"
         cfg_ep = dataclasses.replace(cfg_ep, obstacle_mode=mode)
+    kin = make_kinematics(KIN_URDF_DIR, cfg_ep.embodiment)
     print(f"[eval] {cfg_ep.embodiment} / {cfg_ep.task} / "
           f"{cfg_ep.obstacle_model} / {cfg_ep.obstacle_mode} seed={seed}")
 
@@ -107,7 +109,7 @@ def run_eval_episode(cfg, seed, task, embodiment, encoder, actor,
     for retry in range(5):
         candidate = RolloutController(
             cfg_ep, seed + retry * 1000, mode="filtered", encoder=encoder,
-            actor=actor, critics=critics,
+            kin=kin, actor=actor, critics=critics,
             video=video if retry == 0 else video,
             max_steps=int(cfg_ep.max_steps_per_episode * 250.0 / 25.0),
         )
@@ -196,6 +198,7 @@ def run_cross_eval(cfg, sweep: int, left_embs, encoder, actor,
     Videos + RoundMetrics under <out_dir>/ (= run/eval/cross_embodiment)."""
     import dataclasses
 
+    from main.train.collect import KIN_URDF_DIR, make_kinematics
     from main.train.rollout import RolloutController
     from main.train.round_metrics import RoundMetrics
 
@@ -214,6 +217,7 @@ def run_cross_eval(cfg, sweep: int, left_embs, encoder, actor,
             rng = np.random.RandomState(seed)
             mode = "off_path" if rng.rand() < cfg_ep.off_path_frac else "on_path"
             cfg_ep = dataclasses.replace(cfg_ep, obstacle_mode=mode)
+        kin = make_kinematics(KIN_URDF_DIR, emb)
         video = PanelVideoWriter(
             vid_dir / f"cross_s{sweep:02d}_{emb}_{task}.mp4",
             fps=25.0, h_scale=float(cfg_ep.h_scale),
@@ -222,7 +226,7 @@ def run_cross_eval(cfg, sweep: int, left_embs, encoder, actor,
         for retry in range(5):
             candidate = RolloutController(
                 cfg_ep, seed + retry * 1000, mode="filtered", encoder=encoder,
-                actor=actor, critics=critics,
+                kin=kin, actor=actor, critics=critics,
                 video=video if retry == 0 else None,
                 max_steps=int(cfg_ep.max_steps_per_episode * 250.0 / 25.0),
             )

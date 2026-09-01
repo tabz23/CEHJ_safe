@@ -1,17 +1,15 @@
 """Frozen configuration for HJ-SAC X-VLA baseline runs.
 
-These change what V means, not just how well it trains: dt, kappa (hence
-dtheta_max), softmin T, gamma, the h definition (margins, obstacle-set
-rules), and the encoder variant. Two runs differing in any of them are NOT
-comparable. One versioned file is written alongside the weights and logged
-as the wandb run config.
+These change what V means, not just how well it trains: dt, ee_step_max
+(the EE6D action box), softmin T, gamma, the h definition (margins,
+obstacle-set rules), and the encoder variant. Two runs differing in any of
+them are NOT comparable. One versioned file is written alongside the
+weights and logged as the wandb run config.
 
-Same action space as the joint-space parent: per-tick joint displacements
-dtheta bounded by dtheta_max = URDF velocity limit x control_dt x kappa
-(kappa = 1.0 — a saturated actor tick and a full-speed cuRobo tick share
-the same box); per arm [j1..j7] slots (6-DoF arms drop the 7th), prismatic
-gripper slots never driven. The encoder is the frozen X-VLA VLM
-(xvla_ckpt) instead of HoloBrain.
+Differences from the joint-space parent: the action is X-VLA's EE6D
+(per arm [xyz(3), rot6d(6), gripper(1)], 20 total) bounded per-dim by
+ee_step_max instead of the URDF-velocity dtheta_max box, and the encoder is
+the frozen X-VLA VLM (xvla_ckpt) instead of HoloBrain.
 """
 
 from __future__ import annotations
@@ -45,8 +43,16 @@ def instruction_for(task: str) -> str:
 class FrozenConfig:
     # problem definition (change what V means)
     control_dt: float = 0.04            # 25 Hz control: 250/25 = exactly 10 physics steps/tick
-    kappa: float = 1.0                  # fraction of URDF vel limit per step; 1.0 = actor
-                                        # and a full-speed cuRobo tick share the same dtheta box
+    # per-dim EE6D action bound per tick (one arm's 9-dim block, applied to
+    # both arms): xyz 0.05 m/tick at 25 Hz (= 1.25 m/s), rot6d 1.0 (the two
+    # stored columns are unit vectors — full range, so any delta rotation is
+    # representable; the rotation ANGLE is capped separately by ee_rot_max at
+    # execution, not by the per-dim box); no gripper channel
+    ee_step_max: tuple = (0.05, 0.05, 0.05,
+                          1.0, 1.0, 1.0, 1.0, 1.0, 1.0)  # no gripper dim
+    ee_rot_max: float = 0.5             # rad/tick cap on the executed delta-
+                                        # rotation angle (axis-angle norm of
+                                        # R_delta, clamped in _execute_ee6d)
     softmin_T: float = 0.02             # metres; softmin temperature
     gamma: float = 0.9                  # HJ discount (annealed -> gamma_final)
     gamma_final: float = 0.999
@@ -84,7 +90,7 @@ class FrozenConfig:
     hj_hold_ticks: int = 3              # filter intervention block, control ticks (0.12 s)
     n_episodes: int = 25
     max_steps_per_episode: int = 450    # control ticks: 450 * 10 = 4500 physics steps (18 s)
-    perturb_prob: float = 0.05          # random dtheta injection probability
+    perturb_prob: float = 0.05          # random EE6D injection probability
     rgbsd_archive_every: int = 25       # low-cadence RGB-D archive stride
 
     # SAC
@@ -121,6 +127,7 @@ class FrozenConfig:
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        d["ee_step_max"] = list(d["ee_step_max"])
         d["eval_seeds"] = list(d["eval_seeds"])
         return d
 
@@ -133,6 +140,7 @@ class FrozenConfig:
     @classmethod
     def load(cls, path: str | Path) -> "FrozenConfig":
         d = json.loads(Path(path).read_text())
+        d["ee_step_max"] = tuple(d["ee_step_max"])
         d["eval_seeds"] = tuple(d["eval_seeds"])
         return cls(**d)
 
@@ -152,9 +160,9 @@ def apply_embodiment_selection(
                       checkpoint on the left-out embodiment)
 
     EMBODIMENT_IDS are name-keyed so leaving one out does not shift ids.
-    The count-invariant architecture (no per-joint parameters; the action
-    width is read from dtheta_max at forward time) makes a checkpoint from
-    the 4-embodiment run shape-compatible with the 5th.
+    The embodiment-agnostic architecture (EE6D action space, no per-joint
+    parameters) makes a checkpoint from the 4-embodiment run
+    shape-compatible with the 5th.
     """
     if only:
         if only not in cfg.embodiment_choices:

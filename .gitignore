@@ -29,3 +29,6 @@ data/wandb/
 # Training data (memmap buffers)
 data/
 .kimi-code/
+
+# wandb local run dirs
+wandb/
