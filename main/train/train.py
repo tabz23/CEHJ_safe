@@ -501,6 +501,9 @@ def main() -> None:
                    help="both ablations: plain cross-attention over frozen "
                         "HoloBrain state + scene tokens")
     p.add_argument("--no-wandb", action="store_true")
+    p.add_argument("--cross-eval-every-epochs", type=int, default=10,
+                   help="eval the left-out embodiment(s) every N epochs "
+                        "(3 episodes, tasks rotating)")
     p.add_argument("--filter-margin", type=float, default=None,
                    help="metres: safe actor drives while Q(s,a_nom) "
                         "< margin (0 = only predicted penetration)")
@@ -627,7 +630,7 @@ def main() -> None:
         # cross-embodiment eval: every 10 epochs, 3 filtered episodes on the
         # embodiment(s) excluded from training (LOO), tasks rotating
         left_embs = [e for e in EMBODIMENT_IDS if e not in cfg.embodiment_choices]
-        cross_every = 10 * args.eval_every
+        cross_every = args.cross_eval_every_epochs * args.eval_every
         cross_sweep = 0
         last_cross_step = 0
         for r in range(args.collect_rounds):
