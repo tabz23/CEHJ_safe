@@ -248,11 +248,12 @@ class RolloutController:
             cam.take_picture()
             rgba = cam.get_picture("Color")
             frame = (rgba * 255).clip(0, 255).astype(np.uint8)[:, :, :3]
-            # debug bbox overlay (obstacle + held objects) — the videos are
-            # for debugging; the boxes make filter behavior legible
+            # debug bbox overlay (obstacle + held objects + link collision
+            # boxes) — the videos are for debugging; the boxes make filter
+            # behavior legible
             from main.envs.record import draw_debug_bboxes
 
-            frame = draw_debug_bboxes(self.env, frame, include_links=False)
+            frame = draw_debug_bboxes(self.env, frame, include_links=True)
             v_now = self.trace["V"][-1] if self.trace["V"] else float("nan")
             engaged = bool(self.trace["intervened"][-1]) if self.trace["intervened"] else False
             from main.envs.controller import current_skill
