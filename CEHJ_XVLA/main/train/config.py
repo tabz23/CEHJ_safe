@@ -110,7 +110,9 @@ class FrozenConfig:
     # (predicted penetration), release as soon as Q >= 0. No margin, no
     # hysteresis band — the hj_hold_ticks block provides the commitment.
     filter_margin: float = 0.0
-    filter_release_margin: float = 0.01  # metres; engaged holds until Q >= this
+    filter_release_margin: float = 0.0   # metres; engage Q<0, hold until Q>=0
+                                        # (same threshold; the 3-tick block is
+                                        # the only commitment)
     contact_force_threshold: float = 20.0  # N; collision reporting:
                                         # measured grazes in sim are >= 79 N
                                         # (stiff PD drive), non-contact is 0

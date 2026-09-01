@@ -83,8 +83,9 @@ class FrozenConfig:
     # (predicted penetration), release as soon as Q >= 0. No margin, no
     # hysteresis band — the hj_hold_ticks block provides the commitment.
     filter_margin: float = 0.0
-    filter_release_margin: float = 0.01  # metres; once engaged, the safe
-                                        # actor holds until Q >= this
+    filter_release_margin: float = 0.0   # metres; engage Q<0, hold until Q>=0
+                                        # (same threshold; the 3-tick block is
+                                        # the only commitment)                                        # actor holds until Q >= this
                                         # (hysteresis: engage < 0, release >= 1 cm)
     # ablations: vanilla = both off-features disabled — plain cross-attention
     # over frozen HoloBrain state + scene tokens, same actor/critic heads
