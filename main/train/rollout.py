@@ -252,7 +252,7 @@ class RolloutController:
             # for debugging; the boxes make filter behavior legible
             from main.envs.record import draw_debug_bboxes
 
-            frame = draw_debug_bboxes(self.env, frame)
+            frame = draw_debug_bboxes(self.env, frame, include_links=False)
             v_now = self.trace["V"][-1] if self.trace["V"] else float("nan")
             engaged = bool(self.trace["intervened"][-1]) if self.trace["intervened"] else False
             from main.envs.controller import current_skill

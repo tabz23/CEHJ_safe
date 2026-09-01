@@ -131,7 +131,7 @@ def _draw_cube(frame: np.ndarray, uv: np.ndarray, color) -> np.ndarray:
     return img
 
 
-def draw_debug_bboxes(env, frame: np.ndarray) -> np.ndarray:
+def draw_debug_bboxes(env, frame: np.ndarray, include_links: bool = True) -> np.ndarray:
     cam = env.task.cameras.observer_camera
     img = frame
     if getattr(env, "obstacle", None) is not None:
@@ -150,6 +150,8 @@ def draw_debug_bboxes(env, frame: np.ndarray) -> np.ndarray:
     for side, hit in held.items():
         actor, _label = hit
         img = _draw_cube(img, _project(cam, obstacle_corners(actor)), colors.get(side, (255, 0, 255)))
+    if not include_links:
+        return img
     try:
         spheres = load_collision_spheres(env.embodiment)
     except Exception:

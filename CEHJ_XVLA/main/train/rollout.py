@@ -390,8 +390,10 @@ class RolloutController:
         [linear; angular])."""
         q = torch.as_tensor(q_arm, dtype=torch.float32)[None]
         J = self._serial[arm_i].jacobian(q)[0].double().numpy()  # [6, n]
-        R = self._T_base2world[:3, :3]
-        return np.block([[R @ J[:3]], [R @ J[3:]]])
+        # pk's SerialChain Jacobian is already in the dual-arm URDF root
+        # frame = the frame FK + T_base2world measures EE poses in (verified
+        # by FD against the live sim: applying R again rotated +x -> +y).
+        return np.block([[J[:3]], [J[3:]]])
 
     def _execute_ee6d(self, action: np.ndarray) -> None:
         """EE6D delta -> per-tick joint displacement -> env.step_dtheta.
@@ -520,7 +522,7 @@ class RolloutController:
             # for debugging; the boxes make filter behavior legible
             from main.envs.record import draw_debug_bboxes
 
-            frame = draw_debug_bboxes(self.env, frame)
+            frame = draw_debug_bboxes(self.env, frame, include_links=False)
             v_now = self.trace["V"][-1] if self.trace["V"] else float("nan")
             engaged = bool(self.trace["intervened"][-1]) if self.trace["intervened"] else False
             from main.envs.controller import current_skill
