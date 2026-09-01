@@ -514,6 +514,9 @@ def main() -> None:
     p.add_argument("--init-buffer", type=Path, default=None,
                    help="seed the (empty) training buffer from this warmup "
                         "buffer dir; the warmup buffer is never written")
+    p.add_argument("--capacity", type=int, default=0,
+                   help="training ring buffer size in STEPS (0 = auto: "
+                        "warmup + all rounds); older data evicts past it")
     p.add_argument("--buffer-dir", type=Path, default=None,
                    help="memmap location (default <data>/buffer); use local "
                         "disk — sampling is the training hot path")
@@ -595,6 +598,8 @@ def main() -> None:
         n_collects = args.collect_rounds + (0 if warmup_exists else 1)
         capacity = ((n_warm + n_collects * n_ep)
                     * (cfg.max_steps_per_episode + 2)) if not warmup_exists else None
+        if args.capacity > 0 and not warmup_exists:
+            capacity = args.capacity
         trainer = Trainer(cfg, args.data, args.run, create_capacity=capacity,
                                   buffer_dir=args.buffer_dir)
         if args.init_buffer is not None and len(trainer.buf) == 0:
