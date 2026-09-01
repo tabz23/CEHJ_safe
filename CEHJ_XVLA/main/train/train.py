@@ -529,7 +529,8 @@ def main() -> None:
             if getattr(args, "only_embodiment", None):
                 tags.append(f"only-{args.only_embodiment}")
             tags.append(f"r{args.collect_rounds}x{args.episodes_per_round or 'full'}")
-            run_name = "xvla_" + "_".join(tags)
+            run_name = ("xvla_" + "_".join(tags) + "_" +
+                time.strftime("%m%d-%H%M"))
             run = wandb.init(project="cehj-hjsac", name=run_name,
                              dir=str(args.run))
         except Exception as exc:

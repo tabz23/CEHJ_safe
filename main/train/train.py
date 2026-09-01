@@ -539,7 +539,8 @@ def main() -> None:
         if getattr(args, "ablate_injection", False):
             tags.append("noinj")
     tags.append(f"r{args.collect_rounds}x{args.episodes_per_round or 'full'}")
-    run_name = "hjsac_" + "_".join(tags)
+    run_name = ("hjsac_" + "_".join(tags) + "_" +
+                time.strftime("%m%d-%H%M"))
 
     run = None
     if not args.no_wandb:
