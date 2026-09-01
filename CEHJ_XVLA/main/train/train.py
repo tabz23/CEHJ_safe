@@ -1,4 +1,4 @@
-"""Stage 2 — HJ-SAC training, X-VLA EE6D baseline.
+"""Stage 2 — HJ-SAC training, X-VLA joint-space baseline.
 
 Objective (h computed, never learned; V is the only learned object and
 represents the backward reachable set):
@@ -18,11 +18,16 @@ safer, so a soft target would make the value function optimistic about
 safety — the dangerous direction for an avoid problem. logp_n is computed
 for logging and intentionally unused in the target.
 
+Target entropy note: if alpha is ever auto-tuned, the target is per-sample
+-n_act, not -dim(A).
+
 Representation: the buffer stores PRE-adapter X-VLA scene tokens
-([200, 1024] fp16) and raw EE6D proprio [20]; the adapter and proprio
+([200, 1024] fp16) and raw EE-pose proprio [20]; the adapter and proprio
 encoder run INSIDE grad_step (like the parent's injection/trunk), with
 Polyak target copies alongside the target critics. Policy side everywhere:
-scene = adapter(scene_raw), arm_tokens = proprio_enc(proprio).
+scene = adapter(scene_raw), arm_tokens = proprio_enc(proprio). Jlin/Jang/
+dtheta_max/joint_index come from the buffer (stored per step — a
+mixed-embodiment buffer cannot recompute them).
 
 Usage (from CEHJ_XVLA/):
     python main/train/train.py --data data/smoke --grad-steps 300 --eval-every 150
@@ -56,7 +61,7 @@ CEHJ_ROOT = Path(__file__).resolve().parents[2]
 from main.train.buffer import StepBuffer  # noqa: E402
 from main.train.config import FrozenConfig, apply_embodiment_selection  # noqa: E402
 from main.network.encoder import XVLAEncoder  # noqa: E402
-from main.network.heads import EE6DActor, EE6DTwinCritic, N_ACTION  # noqa: E402
+from main.network.heads import JointActor, JointTwinCritic, arm_layout  # noqa: E402
 
 
 def _safe_wandb_log(wandb_run, logs: dict, step: int) -> None:
@@ -127,12 +132,12 @@ class Trainer:
         # frozen; adapter + proprio_enc train here and are used by the
         # rollout through this same object)
         self.encoder = XVLAEncoder(str(cfg.xvla_ckpt), device="cuda")
-        self.actor = EE6DActor().cuda()
+        self.actor = JointActor().cuda()
         # V lives in h*h_scale units; T is physical metres in the config, so
         # scale it to keep the softmin sharpness physically meaningful
         T = cfg.softmin_T * float(getattr(cfg, "h_scale", 1.0))
-        self.critics = EE6DTwinCritic(temperature=T).cuda()
-        self.critics_targ = EE6DTwinCritic(temperature=T).cuda()
+        self.critics = JointTwinCritic(temperature=T).cuda()
+        self.critics_targ = JointTwinCritic(temperature=T).cuda()
         self.critics_targ.load_state_dict(self.critics.state_dict())
         # target ENCODERS too: Polyak covers nothing if the target's tokens
         # come from the live adapter/proprio_enc — the bootstrap target
@@ -174,44 +179,48 @@ class Trainer:
         return self.cfg.alpha_start + f * (self.cfg.alpha_final - self.cfg.alpha_start)
 
     # ---------- batch ----------
-    def _step_max(self, batch: int) -> torch.Tensor:
-        """[B, 20] per-dim EE6D action bound (constant — embodiment-free)."""
-        sm = torch.as_tensor(
-            np.tile(np.asarray(self.cfg.ee_step_max, dtype=np.float32), 2)
-        ).cuda()
-        return sm[None].expand(batch, N_ACTION)
-
     def _encode(self, b: dict, suffix: str = "", target: bool = False):
-        scene_raw = _t(b["scene_tokens" + suffix])          # [B, 200, 1024]
-        proprio = _t(b["proprio" + suffix])                 # [B, 20]
+        g = lambda k: b[k + suffix]
+        scene_raw = _t(g("scene_tokens"))          # [B, 200, 1024]
+        proprio = _t(g("proprio"))                 # [B, 20]
         if target:
-            scene = self.adapter_targ(scene_raw)            # [B, 200, 256]
+            scene = self.adapter_targ(scene_raw)   # [B, 200, 256]
             arm = self.proprio_enc_targ(
                 proprio.view(-1, 2, 10))  # X-VLA proprio is 10/arm (with grip)
         else:
             scene = self.encoder.adapter(scene_raw)
             arm = self.encoder.encode_proprio(proprio)      # [B, 2, 256]
-        return arm, scene, None
+        # stored per-step (mixed embodiments cannot recompute from qpos)
+        Jlin = _t(g("Jlin"))
+        Jang = _t(g("Jang"))
+        dtheta_max = _t(g("dtheta_max"))
+        cols, ee = arm_layout(g("joint_index"), g("body_mask"))
+        return (arm, scene, None, Jlin, Jang, dtheta_max,
+                torch.from_numpy(cols).cuda(),
+                torch.from_numpy(ee).cuda())
 
     def grad_step(self) -> dict:
         cfg = self.cfg
         b = self.buf.sample(cfg.batch_size, self.rng)
-        arm, scene, scene_mask = self._encode(b)
-        arm_n, scene_n, scene_mask_n = self._encode(b, "_next", target=True)
+        arm, scene, scene_mask, Jlin, Jang, dtheta_max, cols, ee = \
+            self._encode(b)
+        arm_n, scene_n, scene_mask_n, Jlin_n, Jang_n, dtheta_max_n, \
+            cols_n, ee_n = self._encode(b, "_next", target=True)
         h = _t(b["h"])                                      # [B]
-        action = _t(b["action"])                            # executed action
-        B = h.shape[0]
-        step_max = self._step_max(B)
+        dtheta = _t(b["dtheta"])                            # executed action
         gamma, alpha = self.gamma(), self.alpha()
 
         with torch.no_grad():
-            a_n, logp_n = self.actor(arm_n, scene_n, scene_mask_n, step_max)
+            a_n, logp_n, _ = self.actor(arm_n, scene_n, scene_mask_n,
+                                        dtheta_max_n, cols_n)
             q1_t, q2_t, _, _ = self.critics_targ(
-                arm_n, scene_n, scene_mask_n, a_n)
+                arm_n, scene_n, scene_mask_n, a_n, Jlin_n, Jang_n, ee_n,
+                cols_n)
             q_next = torch.minimum(q1_t, q2_t)
             target = (1 - gamma) * h + gamma * torch.minimum(h, q_next)
         # critic update
-        q1, q2, v1, v2 = self.critics(arm, scene, scene_mask, action)
+        q1, q2, v1, v2 = self.critics(arm, scene, scene_mask, dtheta,
+                                      Jlin, Jang, ee, cols)
         loss_q = F.mse_loss(q1, target) + F.mse_loss(q2, target)
         self.opt_c.zero_grad(set_to_none=True)
         self.opt_e.zero_grad(set_to_none=True)
@@ -232,10 +241,11 @@ class Trainer:
             p.requires_grad_(False)
         for p in self.critics.parameters():
             p.requires_grad_(False)
-        a_pi, logp = self.actor(arm.detach(), scene.detach(), scene_mask,
-                                step_max)
+        a_pi, logp, n_act = self.actor(arm.detach(), scene.detach(),
+                                       scene_mask, dtheta_max, cols)
         q1_pi, q2_pi, _, _ = self.critics(
-            arm.detach(), scene.detach(), scene_mask, a_pi)
+            arm.detach(), scene.detach(), scene_mask, a_pi, Jlin, Jang,
+            ee, cols)
         loss_pi = (-torch.minimum(q1_pi, q2_pi) + alpha * logp).mean()
         self.opt_a.zero_grad(set_to_none=True)
         loss_pi.backward()
@@ -268,16 +278,22 @@ class Trainer:
         }
         # mode-collapse diagnostics (does the actor output the same action
         # everywhere?): diversity of the deterministic action across states,
-        # and how hard it leans on the tanh bound
+        # and how hard it leans on the tanh bound. Masked to real joints.
         with torch.no_grad():
-            a_det, _ = self.actor(arm.detach(), scene.detach(), scene_mask,
-                                  step_max, deterministic=True)
-            out["actor/action_std"] = float(a_det.std(dim=0).mean())
-            out["actor/sat_frac"] = float(
-                ((a_det.abs() / step_max.clamp_min(1e-9)) > 0.95
-                 ).float().mean()
+            a_det, _, _ = self.actor(arm.detach(), scene.detach(),
+                                     scene_mask, dtheta_max, cols,
+                                     deterministic=True)
+            jmask = (dtheta_max > 0).float()
+            out["actor/action_std"] = float(
+                (a_det.std(dim=0) * jmask).sum() / jmask.sum().clamp_min(1)
             )
-            out["data/action_std"] = float(action.std(dim=0).mean())
+            out["actor/sat_frac"] = float(
+                ((a_det.abs() / dtheta_max.clamp_min(1e-9)) > 0.95
+                 ).float().mul(jmask).sum() / jmask.sum().clamp_min(1)
+            )
+            out["data/action_std"] = float(
+                (dtheta.std(dim=0) * jmask).sum() / jmask.sum().clamp_min(1)
+            )
         # collision precision/recall: predicted unsafe = Q(s,a) below the
         # filter margin; ground truth = next state actually violated (h < 0,
         # h is stored in h_scale units like the margin). The filter's core
@@ -455,8 +471,9 @@ class Trainer:
 
     def load_checkpoint(self, path: Path) -> None:
         """Load weights from a previous run (e.g. LOO phase 1 -> finetune).
-        Shape-compatible across embodiments by design (EE6D action space,
-        no per-joint parameters). Polyak targets are re-synced to the
+        Shape-compatible across embodiments by design (count-invariant
+        heads: the action width follows dtheta_max, no per-joint
+        parameters). Polyak targets are re-synced to the
         loaded weights."""
         ckpt = torch.load(Path(path), map_location="cuda", weights_only=True)
         self.encoder.adapter.load_state_dict(ckpt["adapter"])

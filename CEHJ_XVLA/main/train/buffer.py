@@ -1,14 +1,22 @@
-"""Flat per-step memmap replay buffer for the X-VLA EE6D HJ-SAC baseline.
+"""Flat per-step memmap replay buffer for the X-VLA joint-space HJ-SAC
+baseline.
 
-Slim EE6D schema (~400 KB/step, dominated by fp16 scene tokens). Stored per
-step: scene_tokens [200, 1024] fp16 (PRE-adapter frozen X-VLA VLM tokens —
-the adapter and proprio encoder train at train time, like the parent's
-injection/trunk), proprio [20] (raw X-VLA EE6D layout: per arm
-[xyz, rot6d, grip] with grip = 1-2g), action [20] (the COMMANDED EE6D delta
-of the tick that led to the NEXT state — planner a_nom / actor /
-perturbation, see action_source), h, embodiment_id, task_id, episode_id,
-done. No contact fields, no Jacobians, no padding — EE6D is
-embodiment-agnostic.
+Stored per step: scene_tokens [200, 1024] fp16 (PRE-adapter frozen X-VLA
+VLM tokens — the adapter and proprio encoder train at train time, like the
+parent's injection/trunk), proprio [20] (raw X-VLA EE-pose layout: per arm
+[xyz, rot6d, grip] with grip = 1-2g), dtheta [18] (the COMMANDED joint
+displacement of the tick that led to the NEXT state — planner a_nom /
+actor / perturbation, see action_source), dtheta_max, joint_index,
+body_mask, block-diagonal Jlin/Jang per link, qpos_raw, h, embodiment_id,
+task_id, episode_id, done.
+
+CROSS-EMBODIMENT (same convention as the joint-space parent): the buffer
+mixes embodiments, so variable-width fields are ZERO-PADDED to fixed maxima
+at append time (validity via joint_index / body_mask): dtheta / dtheta_max
+/ qpos_raw [18] (16 for 6-dof arms: per arm [j1..j7, 2 prismatic], the 7th
+slot of 6-dof arms padded), Jlin/Jang [20, 3, 18]. Jlin/Jang/dtheta_max are
+STORED (not recomputed at sample time) because the recompute would need the
+right embodiment's URDF per sample.
 
 Header (JSON, once): config dict incl. h_scale, softmin_T, dt, the
 task/embodiment/obstacle choice lists, field shapes — without these the
@@ -30,14 +38,22 @@ import numpy as np
 
 SCENE_TOKENS = 200
 TOKEN_DIM = 1024  # pre-adapter X-VLA feature width
-PROPRIO_DIM = 20  # X-VLA EE6D proprio x 2 arms (input encoding, with gripper)
-N_ACTION = 18     # action: dxyz + drot6d per arm, NO gripper (filter never drives it)
+PROPRIO_DIM = 20  # X-VLA EE-pose proprio x 2 arms (input encoding, with gripper)
+N_BODY_TOKENS = 20
+MAX_ACTION = 18   # 2 x 9 per-arm slots ([j1..j7, 2 prismatic]); 6-dof arms
+                  # use 16 — zero-padded
 
 # name -> (dtype, per-step shape)
 FIELDS = {
     "scene_tokens": (np.float16, (SCENE_TOKENS, TOKEN_DIM)),
     "proprio": (np.float32, (PROPRIO_DIM,)),
-    "action": (np.float32, (N_ACTION,)),
+    "dtheta": (np.float32, (MAX_ACTION,)),
+    "dtheta_max": (np.float32, (MAX_ACTION,)),
+    "joint_index": (np.int8, (N_BODY_TOKENS,)),
+    "body_mask": (np.bool_, (N_BODY_TOKENS,)),
+    "Jlin": (np.float16, (N_BODY_TOKENS, 3, MAX_ACTION)),
+    "Jang": (np.float16, (N_BODY_TOKENS, 3, MAX_ACTION)),
+    "qpos_raw": (np.float32, (MAX_ACTION,)),
     "h": (np.float32, ()),
     "embodiment_id": (np.int8, ()),
     "task_id": (np.int8, ()),
@@ -50,8 +66,9 @@ FIELDS = {
 # splitting avoids reading every field twice (the throughput ceiling).
 # `h` is read at both t (Bellman backup) and t+1 (collision precision/recall
 # ground truth) — adding it here only affects sampling, not the memmap layout.
-NEXT_FIELDS = ("scene_tokens", "proprio", "h")
-CUR_FIELDS = NEXT_FIELDS + ("action", "embodiment_id", "task_id",
+NEXT_FIELDS = ("scene_tokens", "proprio", "Jlin", "Jang", "dtheta_max",
+               "joint_index", "body_mask", "h")
+CUR_FIELDS = NEXT_FIELDS + ("dtheta", "embodiment_id", "task_id",
                             "action_source")
 
 

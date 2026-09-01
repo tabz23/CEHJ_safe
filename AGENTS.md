@@ -244,11 +244,13 @@ q/precision-recall, actor/action_std, and the videos for the filter engaging.
   git history; `bench_warmup_cost.py` profiles a collection episode;
   `profile_sim.py` / `bench_step_cost.py` profile the vanilla pipeline.
 
-## CEHJ_XVLA/ — X-VLA EE6D baseline (sibling copy)
+## CEHJ_XVLA/ — X-VLA joint-space baseline (sibling copy)
 
-`CEHJ_XVLA/main/` is a full copy of `main/` with the representation encoder
-and action space swapped; everything above (h semantics, tick structure,
-filter trigger, h_scale, buffer ring semantics, round-based training) carries
+`CEHJ_XVLA/main/` is a copy of `main/` with the representation encoder
+swapped; the ACTION SPACE IS THE SAME AS THE PARENT (per-tick joint
+displacements δθ, NOT EE6D). Everything above (h semantics, tick
+structure, filter trigger, h_scale, buffer ring semantics, round-based
+training, kappa = 1.0, a_nom = pos[min(i_end,T-1)] − qpos_live) carries
 over unless noted:
 
 - Encoder: frozen X-VLA VLM (`network/encoder.py` XVLAEncoder; ckpt dir from
@@ -257,24 +259,23 @@ over unless noted:
   (`_supports_sdpa` class attrs, lm_head-safe `get_output_embeddings`) — see
   encoder.py. pip deps `fastapi uvicorn json_numpy` were added to the
   RoboTwin env for the ckpt's imports.
-- Action: EE6D delta per arm [dxyz(3), drot6d(6), dgrip(1)], 20 dims,
-  bounded per-dim by `cfg.ee_step_max` (0.05 m xyz / 0.1 rot6d / 1.0 grip
-  per tick). Gripper channel is X-VLA's 1-2g space (+1 = closed); execution
-  goes through `task.take_action(..., action_type='ee')` (16-dim:
-  [left xyz+wxyz quat, grip, right xyz+wxyz quat, grip]).
-- a_nom is the EE6D delta from the LIVE measured EE pose to the plan-row EE
-  target (pytorch_kinematics FK of `pos[min(i_end, T-1)]`, calibrated to the
-  get_ee_pose convention by a constant per-arm offset — rollout.py
-  `_calibrate_ee`).
-- Buffer (`train/buffer.py`) is slim: scene_tokens [200,256] fp16
-  (POST-adapter — the 1024→256 adapter is FROZEN; its inputs aren't stored),
-  proprio [20], action [20], h, ids, done. No Jacobians/padding (EE6D is
-  embodiment-agnostic).
-- Trainable: actor, twin critics (EE6DTrunk cross-attn), proprio_enc
-  (Polyak target alongside the critics). quat convention: TRUE wxyz
-  rotations everywhere (X-VLA's own client round-trips through a
-  self-cancelling xyzw/wxyz permutation; the frozen VLM never sees
-  proprio, so we don't replicate the permutation).
-- Caveat: one take_action call plans+plays a short cuRobo path, so an
-  intervention "tick" spans several control ticks; per-tick capture still
-  fires via the scene.step hook.
+- X-VLA has NO robot-state encoder: the policy's robot-state channel is the
+  EE-pose proprio [20] (per arm [xyz, rot6d, 1-2g] → proprio_enc → 2 arm
+  tokens); scene tokens come from the frozen VLM. BodyTokenExtractor still
+  runs per tick for Jlin/Jang/joint_index/dtheta_max (the critic's action
+  effects and the action box).
+- Heads (`network/heads.py`): JointActor (per-arm Gaussian+tanh over
+  MAX_ARM_JOINTS=7 slots, scattered by joint_cols — 6-DoF arms drop slot 7;
+  width from dtheta_max at forward time) + JointTwinCritic (twin per-arm
+  value heads, softmin readout; the action enters as dp/dw = Jlin/Jang @
+  dtheta at each arm's terminal link + the arm's mean dθ). EE6DTrunk
+  (plain cross-attn) is the shared trunk.
+- Buffer (`train/buffer.py`): scene_tokens [200,1024] fp16 (PRE-adapter),
+  proprio [20], dtheta/dtheta_max/qpos_raw [18] (zero-padded like the
+  parent: per arm [j1..j7, 2 prismatic]), joint_index/body_mask [20],
+  Jlin/Jang [20,3,18] fp16, h, ids, done.
+- Trainable: scene adapter, proprio_enc, actor, twin critics — adapter/
+  proprio_enc run inside grad_step on the stored raw tokens, with Polyak
+  target copies alongside the target critics. quat convention: TRUE wxyz
+  rotations in the proprio (the frozen VLM never sees proprio, so X-VLA's
+  permuted client convention is not replicated).
