@@ -3,14 +3,16 @@
 Objective (h computed, never learned; V is the only learned object and
 represents the backward reachable set):
 
-    target  = (1-gamma)*h(s) + gamma*min{ h(s), Q_target(s', a') },  a' ~ pi(s')
+    target  = (1-gamma)*h(s) + gamma*min{ h(s), mean(Q1_targ, Q2_targ)(s', a') },
+              a' ~ pi(s')   (MEAN of twins in the bootstrap — min compounds
+              pessimism ~gamma*b/(1-gamma); min stays in loss_pi + the gate)
     loss_Q  = MSE(Q1, target) + MSE(Q2, target)
     loss_pi = -Q_min(s, pi(s)) + alpha * logp
 
-Annealing: gamma -> 1 (so V doesn't sit at h because the recursion never
-looks far — watch the h - V gap open), alpha -> a small floor (0.02), not
-0: alpha*logp is the only barrier keeping the actor off the tanh walls,
-and the critic has no data there (see config.py alpha_final).
+Annealing: gamma -> gamma_final (0.95; 0.999 let twin/extrapolation bias
+compound 999x and drifted Q down — see config.py), alpha -> a small floor
+(0.02), not 0: alpha*logp is the only barrier keeping the actor off the
+tanh walls, and the critic has no data there (see config.py alpha_final).
 
 NOTE on the Bellman operator: the target is deliberately the HARD Bellman
 (no -alpha*logp_n) while the actor loss keeps the entropy term. alpha is an
@@ -207,7 +209,14 @@ class Trainer:
         with torch.no_grad():
             a_n, logp_n, _, _ = self.actor(enc_n.body, ji_n, dtheta_max_n)
             q1_t, q2_t, _, _ = self.critics_targ(enc_n, a_n, Jlin_n, Jang_n, ji_n)
-            q_next = torch.minimum(q1_t, q2_t)
+            # MEAN of twins in the bootstrap, not min: min-of-twins is a
+            # per-backup downward bias that compounds ~gamma*b/(1-gamma),
+            # and the outer min(h, .) only clamps it where Q' > h — so the
+            # pessimism accumulates exactly in the Q < h region the filter
+            # operates in (over-conservative actor after ~50k steps). The
+            # min stays where conservatism is wanted: loss_pi and the
+            # filter gate (qmin below / SafetyFilter).
+            q_next = 0.5 * (q1_t + q2_t)
             target = (1 - gamma) * h + gamma * torch.minimum(h, q_next)
         # critic update
         q1, q2, v1, v2 = self.critics(enc, dtheta, Jlin, Jang, ji)

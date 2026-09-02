@@ -208,7 +208,11 @@ class Trainer:
             a_n, logp_n, _ = self.actor(arm_n, scene_n, scene_mask_n, step_max)
             q1_t, q2_t, _, _ = self.critics_targ(
                 arm_n, scene_n, scene_mask_n, a_n)
-            q_next = torch.minimum(q1_t, q2_t)
+            # MEAN of twins in the bootstrap, not min — see the parent
+            # train.py: min-of-twins compounds pessimism ~gamma*b/(1-gamma)
+            # exactly in the Q < h region the filter operates in. The min
+            # stays in loss_pi and the filter gate.
+            q_next = 0.5 * (q1_t + q2_t)
             target = (1 - gamma) * h + gamma * torch.minimum(h, q_next)
         # critic update
         q1, q2, v1, v2 = self.critics(arm, scene, scene_mask, action)
