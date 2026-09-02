@@ -62,7 +62,7 @@ class FrozenConfig:
     rgbsd_archive_every: int = 25       # low-cadence RGB-D archive stride
 
     # SAC
-    batch_size: int = 128
+    batch_size: int = 64
     lr: float = 3e-4
     tau: float = 0.005                  # target critic Polyak
     alpha_start: float = 0.2            # entropy temperature (annealed -> alpha_final)

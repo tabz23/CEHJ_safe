@@ -1103,9 +1103,48 @@ class TickChunkedController(ResidualController):
         def take_dense_action(control_seq, save_freq=-1):
             return ctrl._tick_take_dense_action(orig_take, control_seq, save_freq)
 
+        def together_move_to_pose(
+            left_target_pose,
+            right_target_pose,
+            left_constraint_pose=None,
+            right_constraint_pose=None,
+            **kw,
+        ):
+            # Stock together_move_to_pose plays both joint paths itself
+            # (set_arm_joints + scene.step in its own loop), bypassing
+            # take_dense_action — which disables the per-tick safety filter
+            # for the whole dual-arm phase (no q_nom, no intervention, no V
+            # in the video). Route it through the tick-chunked path as a
+            # pair of tagged single-arm plans (same as _base_task.move does
+            # for one-arm moves).
+            if not task.plan_success:
+                return False
+            left_target = _as_pose_list(left_target_pose)
+            right_target = _as_pose_list(right_target_pose)
+            if left_target is None or right_target is None:
+                task.plan_success = False
+                return False
+            control_seq = {
+                "left_arm": left_move_to_pose(
+                    left_target, constraint_pose=left_constraint_pose),
+                "right_arm": right_move_to_pose(
+                    right_target, constraint_pose=right_constraint_pose),
+                "left_gripper": None,
+                "right_gripper": None,
+            }
+            if not _plan_ok(control_seq["left_arm"]) or not _plan_ok(
+                control_seq["right_arm"]
+            ):
+                task.plan_success = False
+                return False
+            task.left_joint_path.append(deepcopy(control_seq["left_arm"]))
+            task.right_joint_path.append(deepcopy(control_seq["right_arm"]))
+            return task.take_dense_action(control_seq)
+
         task.left_move_to_pose = left_move_to_pose
         task.right_move_to_pose = right_move_to_pose
         task.take_dense_action = take_dense_action
+        task.together_move_to_pose = together_move_to_pose
         task._cehj_tick_attached = True
         print("[controller] vanilla_tick: tick-chunked, replan on intervention")
 
