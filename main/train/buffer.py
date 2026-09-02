@@ -196,7 +196,9 @@ class StepBuffer:
         """LOO support: restrict sampling to these embodiment_ids (None = all).
 
         One shared warmup buffer holds all embodiments; each leave-one-out
-        run just filters the held-out embodiment out of the sampled batches.
+        run filters the held-out embodiment out of the sampled batches —
+        and out of the seeded ring too (seed_from honors this filter, so a
+        leave-4-out ring isn't filled with unsamplable rows).
         """
         self._emb_filter = None if allowed_ids is None else np.array(
             sorted(allowed_ids), dtype=np.int8
@@ -233,20 +235,45 @@ class StepBuffer:
         return self._valid_t
 
     def seed_from(self, src_dir) -> None:
-        """Copy every row from another buffer into this one — seeds the
-        training ring from a reusable, separately-collected warmup buffer.
-        The warmup buffer is never written to; when the ring fills, warmup
-        rows are the oldest and get evicted first."""
+        """Copy rows from another buffer into this one — seeds the training
+        ring from a reusable, separately-collected warmup buffer. The warmup
+        buffer is never written to; when the ring fills, warmup rows are the
+        oldest and get evicted first.
+
+        If an embodiment filter is set (LOO/L4O), only allowed-embodiment
+        rows are copied: held-out rows are unsamplable anyway, and copying
+        them would waste most of the ring in a leave-4-out run (110k shared
+        warmup -> only ~1/5 usable, the rest dead capacity). Compaction
+        preserves within-episode row order, so (t, t+1) pairs survive.
+        """
         src = StepBuffer(src_dir)
         assert self.n == 0, "seed_from into a non-empty buffer"
+        emb_filter = getattr(self, "_emb_filter", None)
+        filtered = emb_filter is not None and "embodiment_id" in src.arrays
+        keep = (
+            np.isin(np.asarray(src.arrays["embodiment_id"][: src.n]), emb_filter)
+            if filtered else None
+        )
+        n_keep = int(keep.sum()) if filtered else src.n
+        CHUNK = 1024  # rows per copy block (scene_tokens rows are ~0.6 MB)
         for name, arr in src.arrays.items():
             dst = self._create(name, np.asarray(arr[0]))
-            dst[: src.n] = arr[: src.n]
+            if not filtered:
+                dst[: src.n] = arr[: src.n]
+            else:
+                w = 0
+                for lo in range(0, src.n, CHUNK):
+                    hi = min(lo + CHUNK, src.n)
+                    block = np.asarray(arr[lo:hi])[keep[lo:hi]]
+                    dst[w: w + len(block)] = block
+                    w += len(block)
             dst.flush()
-        self.n = self.head = src.n
-        self.header["n"] = src.n
-        self.header["head"] = src.n
+        self.n = self.head = n_keep
+        self.header["n"] = n_keep
+        self.header["head"] = n_keep
         self.flush()
+        print(f"[buffer] seeded {n_keep}/{src.n} rows from {src_dir}"
+              + (" (embodiment-filtered)" if filtered else ""))
 
     def sample(self, batch: int, rng: np.random.RandomState | None = None) -> dict:
         """Sample (t, t+1) pairs; pairs never cross an episode boundary.

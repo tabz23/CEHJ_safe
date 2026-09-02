@@ -103,7 +103,8 @@ Ablated runs need their own checkpoints — logit shapes differ.
 
 ONE shared warmup buffer for everything — collect the full 5x5 pool once,
 never per split (the trainer filters samples by embodiment_id at sampling
-time; see buffer.set_embodiment_filter):
+time AND at seed time, so the ring holds only trainable rows; see
+buffer.set_embodiment_filter / seed_from):
 
 ```
 python main/train/collect.py --episodes 250 --success-only --record-video \
