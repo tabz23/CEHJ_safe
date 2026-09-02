@@ -3,12 +3,14 @@
 Objective (h computed, never learned; V is the only learned object and
 represents the backward reachable set):
 
-    target  = (1-gamma)*h(s) + gamma*min{ h(s), Q_target(s', a') },  a' ~ pi(s')
+    target  = (1-gamma)*h(s) + gamma*min{ h(s), mean(Q1_targ, Q2_targ)(s', a') },
+              a' ~ pi(s')   (MEAN of twins in the bootstrap — see the parent
+              train.py; min stays in loss_pi + the gate)
     loss_Q  = MSE(Q1, target) + MSE(Q2, target)
     loss_pi = -Q_min(s, pi(s)) + alpha * logp
 
-Annealing: gamma -> 1 (so V doesn't sit at h because the recursion never
-looks far — watch the h - V gap open), alpha -> 0 aggressively.
+gamma is FIXED at 0.9 (no annealing). alpha -> a small floor (0.02), not
+0 — see the parent config.py.
 
 NOTE on the Bellman operator: the target is deliberately the HARD Bellman
 (no -alpha*logp_n) while the actor loss keeps the entropy term. alpha is an

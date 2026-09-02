@@ -9,10 +9,11 @@ represents the backward reachable set):
     loss_Q  = MSE(Q1, target) + MSE(Q2, target)
     loss_pi = -Q_min(s, pi(s)) + alpha * logp
 
-Annealing: gamma -> gamma_final (0.95; 0.999 let twin/extrapolation bias
-compound 999x and drifted Q down — see config.py), alpha -> a small floor
-(0.02), not 0: alpha*logp is the only barrier keeping the actor off the
-tanh walls, and the critic has no data there (see config.py alpha_final).
+gamma is FIXED at 0.9 (no annealing — the schedule itself drifted V; the
+bias compounding is handled by the mean-of-twins bootstrap instead).
+alpha -> a small floor (0.02), not 0: alpha*logp is the only barrier
+keeping the actor off the tanh walls, and the critic has no data there
+(see config.py alpha_final).
 
 NOTE on the Bellman operator: the target is deliberately the HARD Bellman
 (no -alpha*logp_n) while the actor loss keeps the entropy term. alpha is an

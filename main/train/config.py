@@ -22,18 +22,14 @@ class FrozenConfig:
     kappa: float = 1.0                  # fraction of URDF vel limit per step; 1.0 = actor
                                         # and a full-speed cuRobo tick share the same dtheta box
     softmin_T: float = 0.02             # metres; softmin temperature
-    gamma: float = 0.9                  # HJ discount (annealed -> gamma_final)
-    gamma_final: float = 0.95           # NOT 0.999: the bootstrap bias (any
-                                        # residual twin disagreement +
-                                        # extrapolation error on near-boundary
-                                        # states) compounds ~gamma*b/(1-gamma)
-                                        # — 9x at 0.9, 99x at 0.99, 999x at
-                                        # 0.999. 0.95 is ~20 ticks (0.8 s at
-                                        # 25 Hz), on the order of the braking
-                                        # horizon the BRT question needs
-                                        # ("can I stop before contact" is tens
-                                        # of ticks, not hundreds).
-    gamma_anneal_steps: int = 50_000
+    gamma: float = 0.9                  # HJ discount — FIXED, no annealing
+                                        # (the 0.9 -> gamma_final schedule
+                                        # drifted V during training; bias
+                                        # compounding ~gamma*b/(1-gamma) is
+                                        # handled instead by the mean-of-twins
+                                        # bootstrap, see train.py).
+    gamma_final: float = 0.9            # == gamma: constant schedule
+    gamma_anneal_steps: int = 50_000    # unused while gamma_final == gamma
     table_margin: float = 0.01          # table margin for cuRobo's world model (NOT in h)
     table_height: float = 0.74          # RoboTwin default table height (m)
     h_scale: float = 20.0               # h/V are trained in h*20 units (~[-1, 1] for
