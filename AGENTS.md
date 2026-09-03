@@ -207,8 +207,9 @@ q/precision-recall, actor/action_std, and the videos for the filter engaging.
 ## Videos
 
 - Panel video per episode attempt (warmup: all; rounds: filter episodes only).
-  Observer frame + bbox overlay (obstacle/held/link collision boxes) +
-  fixed-height panel:
+  Observer frame + fixed-height panel; the bbox overlay
+  (obstacle/held/link collision boxes) is OFF by default — set
+  `cfg.video_bbox = True` (or edit config.py) for debug runs. Panel:
   h/Q on one line (cm), control+|a| on one line, intervention counter, block
   counter (always present), force line (red + TOUCH on contact), h/V/F
   mini-plot (F normalized — checks alignment with h dips).

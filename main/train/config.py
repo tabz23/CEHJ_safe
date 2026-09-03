@@ -83,6 +83,9 @@ class FrozenConfig:
     alpha_anneal_steps: int = 20_000
     grad_steps: int = 204800            # 200 epochs x 1024 (real training default)
     eval_every: int = 1024              # one epoch = 1024 grad steps (test runs: 50)
+    video_bbox: bool = False            # draw obstacle/held/link bboxes on
+                                        # recorded videos (off by default;
+                                        # enable for debug runs)
     eval_sweep_every_epochs: int = 0    # rollout sweeps disabled by default —
                                         # round collection records filter metrics
                                         # (RoundMetrics); >0 re-enables sweeps
