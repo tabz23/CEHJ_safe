@@ -238,7 +238,19 @@ def run_cross_eval(cfg, sweep: int, left_embs, encoder, actor,
             video.close()
             print(f"[cross] spawn failed 5x for {emb}/{task}; skipping")
             continue
-        trace = ro.run()
+        # a failed episode must never kill training (see the parent
+        # eval_utils.py: sporadic grasp-planning AssertionError returns an
+        # empty trace; anything else here used to crash the whole run)
+        try:
+            trace = ro.run()
+        except Exception as exc:
+            import traceback
+
+            traceback.print_exc()
+            print(f"[cross] sweep {sweep}: {emb}/{task} raised "
+                  f"{type(exc).__name__}; skipping")
+            video.close()
+            continue
         video.close()
         if not trace["h"]:
             print(f"[cross] sweep {sweep}: {emb}/{task} produced no ticks; "

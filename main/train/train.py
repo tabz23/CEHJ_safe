@@ -516,6 +516,9 @@ def main() -> None:
     p.add_argument("--warmup-episodes", type=int, default=0,
                    help="no warmup buffer? collect N success-only nominal "
                         "episodes first (capacity sized for them)")
+    p.add_argument("--warmup-keep-failed", action="store_true",
+                   help="warmup keeps failed episodes too (default is "
+                        "success-only)")
     p.add_argument("--collect-rounds", type=int, default=0,
                    help=">0: DAgger loop — collect N rounds (round 0 "
                         "nominal-only, later rounds cfg.filter_episode_frac "
@@ -560,6 +563,7 @@ def main() -> None:
     args = p.parse_args()
     args.data = args.data.resolve()
     args.run = args.run.resolve()  # RoboTwin chdirs during env creation
+    args.capacity = 300000
 
     # meaningful run name: split + ablation + scale, e.g.
     # "hjsac_loo-franka-panda_r100" or "hjsac_full_vanilla_r40"
@@ -657,12 +661,14 @@ def main() -> None:
         id_base = 10_000 if warmup_exists else 0
         if not warmup_exists:
             if n_warm > 0:
-                # from-scratch: success-only nominal warmup (same semantics as
-                # collect.py --success-only), videos recorded
+                # from-scratch: nominal warmup (same semantics as collect.py),
+                # videos recorded; success-only unless --warmup-keep-failed
                 cfg_w = dataclasses.replace(cfg, n_episodes=n_warm)
                 collect(cfg_w, args.data, buf=trainer.buf, episode_offset=0,
                         encoder=trainer._eval_encoder, models=None,
-                        round_index=0, success_only=True, record_video=True)
+                        round_index=0,
+                        success_only=not args.warmup_keep_failed,
+                        record_video=True)
             else:
                 cfg_w = dataclasses.replace(cfg, n_episodes=n_ep)
                 collect(cfg_w, args.data, buf=trainer.buf, episode_offset=0,
